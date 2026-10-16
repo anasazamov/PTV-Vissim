@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
+import re
 import sys
 import threading
 import time
@@ -16,6 +18,7 @@ import win32com.client
 from win32com.client import dynamic
 
 from fake_backend import FakeBackend
+from fake_procs import FakeProcs
 from fake_vissim import (
     CO_E_CLASSSTRING,
     CO_E_NOTINITIALIZED,
@@ -147,6 +150,18 @@ def test_env_options_reach_the_fake(monkeypatch: pytest.MonkeyPatch) -> None:
     assert in_thread(lambda: dynamic.Dispatch("Vissim.Vissim").Net.Links.Count, init=True)["value"] == 0
 
 
+def test_dispatch_fails_when_the_spawned_server_process_dies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like real COM: the stand-in starts before the start-up hang; if it dies meanwhile (e.g. the server
+    killed it because of a license dialog), Dispatch fails with CO_E_SERVER_EXEC_FAILURE at once."""
+    executable = getattr(sys, "_base_executable", None) or sys.executable
+    monkeypatch.setenv("FAKE_VISSIM_SPAWN", json.dumps([executable, "-c", "pass"]))
+    monkeypatch.setenv("FAKE_VISSIM_HANG_S", "30")
+    started = time.perf_counter()
+    error = in_thread(lambda: dynamic.Dispatch("Vissim.Vissim"), init=True)["error"]
+    assert time.perf_counter() - started < 10
+    assert isinstance(error, pywintypes.com_error) and error.hresult == CO_E_SERVER_EXEC_FAILURE
+
+
 # --- FakeBackend
 
 
@@ -193,6 +208,39 @@ def test_fake_backend_errors_and_delay() -> None:
         assert time.perf_counter() - started < 5
     finally:
         backend.co_uninitialize()
+
+
+def test_fake_backend_dispatch_fails_when_the_started_process_dies() -> None:
+    procs = FakeProcs()
+    backend = FakeBackend(dispatch_delay_s=30, on_dispatch=lambda progid: procs.spawn())
+
+    def start() -> Any:
+        backend.co_initialize()
+        return backend.dispatch("Vissim.Vissim")
+
+    threading.Timer(0.1, lambda: next(iter(procs.table.values())).end("kill")).start()
+    started = time.perf_counter()
+    error = in_thread(start)["error"]
+    assert time.perf_counter() - started < 5
+    assert isinstance(error, pywintypes.com_error) and error.hresult == CO_E_SERVER_EXEC_FAILURE
+    assert backend.instances == []
+
+
+def test_fake_backend_links_the_process_to_the_fake_vissim() -> None:
+    procs = FakeProcs()
+    backend = FakeBackend(on_dispatch=lambda progid: procs.spawn())
+    backend.co_initialize()
+    first = backend.dispatch("Vissim.Vissim")
+    process = first.process
+    assert process is procs.table[process.pid] and process.alive
+    first.Exit()  # Vissim leaves by itself
+    assert process.ended_by == "exit" and not first.crashed
+
+    second = backend.dispatch("Vissim.Vissim")
+    procs.kill(second.process.pid, second.process.create_time, re.compile(r"^vissim\d*\.exe$", re.I))
+    assert second.crashed  # a killed process disconnects the COM object
+    with pytest.raises(pywintypes.com_error):
+        _ = second.Net
 
 
 def test_fake_backend_passes_options_to_fake_vissim() -> None:

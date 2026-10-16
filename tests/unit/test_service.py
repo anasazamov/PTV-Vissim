@@ -1,4 +1,5 @@
-"""service.py (M1 part): health() without COM and the bounded shutdown sequence."""
+"""service.py: health() without COM and the bounded shutdown sequence (the connection life cycle is in
+test_service_lifecycle.py)."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ from typing import Any
 
 from vissim_mcp import __version__
 from vissim_mcp.config import Settings, load_settings
+from vissim_mcp.errors import ErrorCode
 from vissim_mcp.service import SHUTDOWN_WORKER_JOIN_S, VissimService
 
 HEALTH_KEYS = {
@@ -110,8 +112,8 @@ class RecordingWorker:
         self.calls: list[tuple[str, Any]] = []
         self.fail = fail
 
-    def stop(self) -> None:
-        self.calls.append(("stop", None))
+    def stop(self, *args: Any) -> None:
+        self.calls.append(("stop", args))
         if self.fail:
             raise RuntimeError("worker already dead")
 
@@ -126,7 +128,10 @@ def test_shutdown_fast_is_bounded_and_idempotent(settings: Settings) -> None:
     started = time.perf_counter()
     service.shutdown_fast()
     assert time.perf_counter() - started < 0.2
-    assert worker.calls == [("stop", None), ("join", SHUTDOWN_WORKER_JOIN_S)]
+    assert worker.calls == [
+        ("stop", (ErrorCode.SHUTTING_DOWN, "the server is shutting down")),
+        ("join", SHUTDOWN_WORKER_JOIN_S),
+    ]
     assert service.shutting_down is True
     service.shutdown_fast()
     assert len(worker.calls) == 2

@@ -1116,6 +1116,7 @@ class FakeVissim(FakeComObject):
         reject_non_ascii_paths: bool = False,
         exit_keeps_process: bool = False,
         spawn_cmd: Sequence[str] | None = None,
+        spawn_env: Mapping[str, str] | None = None,
         hang_on: Mapping[str, float] | None = None,
     ) -> None:
         super().__init__(None, "Vissim")
@@ -1177,9 +1178,9 @@ class FakeVissim(FakeComObject):
         for member, seconds in (hang_on or {}).items():
             self.hang_on(member, seconds)
 
-        self.process: subprocess.Popen[bytes] | None = None
+        self.process: Any = None  # subprocess.Popen (or a Popen-like test double)
         if spawn_cmd:
-            self._spawn(list(spawn_cmd))
+            self.process = spawn_standin(spawn_cmd, spawn_env)
 
     # --- construction from env
 
@@ -1210,6 +1211,8 @@ class FakeVissim(FakeComObject):
         for seconds in (pending_hang, rule_hang):
             if seconds:
                 self._hang_release.wait(seconds)
+                if self._crashed:  # the process died during the hung call (e.g. it was killed)
+                    raise make_com_error(RPC_S_SERVER_UNAVAILABLE)
         if pending_error is not None:
             raise pending_error
 
@@ -1272,6 +1275,19 @@ class FakeVissim(FakeComObject):
             self._sim_active = False
         if kill_process:
             self.kill_process()
+
+    def process_ended(self, how: str) -> None:
+        """The stand-in process ended (``how`` = exit, terminate, kill, crash).
+
+        Except after ``Exit()`` this is a lost server: later calls raise ``RPC_E_DISCONNECTED`` and a hung
+        call fails at once with ``RPC_S_SERVER_UNAVAILABLE`` - like real COM when the Vissim process is
+        killed.
+        """
+        if how != "exit" or not self._exited:
+            with self._lock:
+                self._crashed = True
+                self._sim_active = False
+        self._hang_release.set()
 
     @property
     def crashed(self) -> bool:
@@ -1630,19 +1646,6 @@ class FakeVissim(FakeComObject):
 
     # --- the process
 
-    def _spawn(self, cmd: list[str]) -> None:
-        kwargs: dict[str, Any] = {
-            "stdin": subprocess.DEVNULL,
-            "stdout": subprocess.DEVNULL,
-            "stderr": subprocess.DEVNULL,
-            "close_fds": True,
-        }
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-        else:
-            kwargs["start_new_session"] = True
-        self.process = subprocess.Popen(cmd, **kwargs)
-
     def terminate_process(self) -> None:
         """Ask the spawned stand-in process to exit (like Vissim after ``Exit()``)."""
         if self.process is not None and self.process.poll() is None:
@@ -1660,6 +1663,30 @@ class FakeVissim(FakeComObject):
 
 
 # --- helpers
+
+
+def spawn_standin(cmd: Sequence[str], extra_env: Mapping[str, str] | None = None) -> subprocess.Popen[bytes]:
+    """Start the stand-in process of a fake Vissim (detached from our console; ``extra_env`` added to the
+    environment - an empty value removes the variable)."""
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if extra_env:
+        env = dict(os.environ)
+        for name, value in extra_env.items():
+            if value:
+                env[name] = value
+            else:
+                env.pop(name, None)
+        kwargs["env"] = env
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+    return subprocess.Popen(list(cmd), **kwargs)
 
 
 def _pseudo(base: str, key: Any, seed: Any, extra: str) -> float | int:
@@ -1784,7 +1811,7 @@ def options_from_env(environ: Mapping[str, str]) -> dict[str, Any]:
     ``FAKE_VISSIM_CRASH_AFTER_CALLS=n``, ``FAKE_VISSIM_WALL_S_PER_SIM_S=0.001``,
     ``FAKE_VISSIM_NO_TYPE_INFO=1``, ``FAKE_VISSIM_REJECT_NON_ASCII=1``, ``FAKE_VISSIM_EXIT_KEEPS_PROCESS=1``,
     ``FAKE_VISSIM_HANG_ON=LoadNet:30;Simulation.RunContinuous:5``, ``FAKE_VISSIM_SPAWN=["exe", "arg"]``
-    (JSON).
+    (JSON), ``FAKE_VISSIM_SPAWN_ENV={"NAME": "value"}`` (JSON; extra environment of the spawned process).
     """
     options: dict[str, Any] = {}
     if _env_bool(environ.get("FAKE_VISSIM_PRINT_STDOUT")):
@@ -1824,6 +1851,13 @@ def options_from_env(environ: Mapping[str, str]) -> dict[str, Any]:
         if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
             raise ValueError("FAKE_VISSIM_SPAWN must be a JSON list of strings")
         options["spawn_cmd"] = command
+    if environ.get("FAKE_VISSIM_SPAWN_ENV"):
+        extra = json.loads(environ["FAKE_VISSIM_SPAWN_ENV"])
+        if not isinstance(extra, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in extra.items()
+        ):
+            raise ValueError("FAKE_VISSIM_SPAWN_ENV must be a JSON object of strings")
+        options["spawn_env"] = extra
     return options
 
 

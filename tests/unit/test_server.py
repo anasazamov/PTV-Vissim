@@ -17,11 +17,17 @@ from vissim_mcp.server import EofSignallingReader, ProtocolWriter, build_server
 from vissim_mcp.service import VissimService
 
 
-async def test_build_server_registers_only_vissim_health(service: VissimService, settings: Settings) -> None:
+async def test_build_server_registers_the_lifecycle_tools(service: VissimService, settings: Settings) -> None:
     mcp = build_server(service, settings)
     tools = await mcp.list_tools()
-    assert [tool.name for tool in tools] == ["vissim_health"]
-    (tool,) = tools
+    assert [tool.name for tool in tools] == [
+        "vissim_connect",
+        "vissim_health",
+        "vissim_info",
+        "vissim_restart",
+        "vissim_close",
+    ]
+    tool = tools[1]
     assert tool.annotations is not None and tool.annotations.readOnlyHint is True
     assert tool.annotations.destructiveHint is False
     assert tool.inputSchema.get("properties", {}) == {}

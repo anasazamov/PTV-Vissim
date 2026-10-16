@@ -14,38 +14,16 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 from noise import NOISE_LABELS
+from protocol_helpers import LIFECYCLE_TOOLS, finish, handshake
 
 from stdio_client import StdioServer
 from vissim_mcp import __version__
 
-EXIT_BUDGET_S = 0.300
 LAUNCHER = Path(__file__).resolve().with_name("noisy_launcher.py")
 StartServer = Callable[..., StdioServer]
-
-
-def handshake(server: StdioServer) -> dict[str, dict[str, Any]]:
-    """initialize -> notifications/initialized -> tools/list; returns the tools by name."""
-    init = server.initialize()
-    result = init["result"]
-    assert result["serverInfo"] == {"name": "vissim", "version": __version__}
-    assert "vissim_health" in result.get("instructions", "")
-    assert "tools" in result["capabilities"]
-    tools = server.request("tools/list")["result"]["tools"]
-    return {tool["name"]: tool for tool in tools}
-
-
-def finish(server: StdioServer) -> float:
-    """Close stdin, check the exit budget and code, and validate the complete stdout."""
-    exit_s = server.close_stdin_and_time_exit()
-    assert server.process.returncode == 0, server.stderr_text()
-    server.finish_reading()
-    server.assert_stdout_is_jsonrpc()
-    assert exit_s < EXIT_BUDGET_S, f"server needed {exit_s * 1000:.0f} ms to exit after stdin closed"
-    return exit_s
 
 
 def test_initialize_tools_list_health_and_fast_exit(
@@ -53,7 +31,7 @@ def test_initialize_tools_list_health_and_fast_exit(
 ) -> None:
     server = start_server()
     tools = handshake(server)
-    assert list(tools) == ["vissim_health"]
+    assert list(tools) == LIFECYCLE_TOOLS
     health_tool = tools["vissim_health"]
     assert health_tool["annotations"]["readOnlyHint"] is True
     assert health_tool["inputSchema"]["type"] == "object"
@@ -81,7 +59,7 @@ def test_deliberate_noise_never_reaches_stdout(start_server: StartServer) -> Non
         env={"NOISY_LAUNCHER_FAKE_COM": "1", "FAKE_VISSIM_PRINT_STDOUT": "1"},
     )
     tools = handshake(server)
-    assert list(tools) == ["vissim_health"]
+    assert list(tools) == LIFECYCLE_TOOLS
     assert server.call_tool("vissim_health")["payload"]["ok"] is True
     finish(server)
 
@@ -101,7 +79,7 @@ def test_garbage_input_does_not_break_the_session(start_server: StartServer) -> 
     server.send_raw(b"this is not json\n")
     server.send_raw(b'{"jsonrpc": "2.0", "id": 99, "method": "no/such/method"}\n')
     tools = server.request("tools/list")["result"]["tools"]
-    assert [tool["name"] for tool in tools] == ["vissim_health"]
+    assert [tool["name"] for tool in tools] == LIFECYCLE_TOOLS
     assert server.call_tool("vissim_health")["payload"]["ok"] is True
     finish(server)
 

@@ -4,6 +4,9 @@ For fast in-process unit tests of the worker, service and tools - no pywin32, no
 real backend's rules: ``dispatch`` fails with ``CO_E_NOTINITIALIZED`` on a thread that did not call
 ``co_initialize``, unknown ProgIDs fail with ``CO_E_CLASSSTRING``, and the created ``FakeVissim`` is bound to
 the dispatching thread.
+
+``BackendFactory`` is a ``backend_factory`` for ``VissimService`` that creates one ``FakeBackend`` per connect
+and, together with ``tests/fake_procs.FakeProcs``, lets every ``Dispatch`` "start" a fake Vissim process.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ from typing import Any
 from fake_vissim import (
     CO_E_CLASSSTRING,
     CO_E_NOTINITIALIZED,
+    CO_E_SERVER_EXEC_FAILURE,
     PLUMBING_MEMBERS,
     FakeVissim,
     is_registered_progid,
@@ -31,7 +35,13 @@ class FakeBackend:
     ``is_com_error``, ``type_info_members``.
 
     ``dispatch_delay_s`` blocks ``dispatch`` (until ``release_dispatch()``), ``dispatch_error`` (an HRESULT or
-    an exception instance) makes it fail; every other keyword argument is passed to ``FakeVissim``.
+    an exception instance) makes it fail (it is read after the delay, so a test may set it meanwhile).
+
+    ``on_dispatch(progid)`` runs at the start of ``dispatch`` (on the worker thread) and may return the
+    "started" process (a ``fake_procs.FakeProcess``): like real COM, ``dispatch`` then fails with
+    ``CO_E_SERVER_EXEC_FAILURE`` when that process dies before the delay is over, and on success the process
+    becomes ``FakeVissim.process`` - its end disconnects the fake (``FakeVissim.process_ended``).
+    Every other keyword argument is passed to ``FakeVissim``.
     """
 
     name = "fake"
@@ -42,11 +52,13 @@ class FakeBackend:
         factory: Callable[[str], FakeVissim] | None = None,
         dispatch_delay_s: float = 0.0,
         dispatch_error: int | BaseException | None = None,
+        on_dispatch: Callable[[str], Any] | None = None,
         **vissim_options: Any,
     ) -> None:
         self._factory = factory or (lambda progid: FakeVissim(progid, **vissim_options))
         self.dispatch_delay_s = dispatch_delay_s
         self.dispatch_error = dispatch_error
+        self.on_dispatch = on_dispatch
         self.instances: list[FakeVissim] = []
         self.events: list[tuple[str, str]] = []
         self.pump_count = 0
@@ -78,14 +90,25 @@ class FakeBackend:
             raise make_com_error(CO_E_NOTINITIALIZED)
         if not is_registered_progid(progid):
             raise make_com_error(CO_E_CLASSSTRING)
+        process = self.on_dispatch(progid) if self.on_dispatch is not None else None
+        end_callbacks = getattr(process, "on_end", None)
+        if isinstance(end_callbacks, list):
+            end_callbacks.append(lambda _how: self._dispatch_release.set())
         if self.dispatch_delay_s > 0:
             self._dispatch_release.wait(self.dispatch_delay_s)
+        poll = getattr(process, "poll", None)
+        if callable(poll) and poll() is not None:
+            raise make_com_error(CO_E_SERVER_EXEC_FAILURE)  # the server process died while starting
         error = self.dispatch_error
         if isinstance(error, BaseException):
             raise error
         if error is not None:
             raise make_com_error(int(error))
         vissim = self._factory(progid)
+        if process is not None:
+            vissim.process = process
+            if isinstance(end_callbacks, list):
+                end_callbacks.append(vissim.process_ended)
         with self._lock:
             self.instances.append(vissim)
         return vissim
@@ -137,3 +160,54 @@ class FakeBackend:
     def _event(self, name: str) -> None:
         with self._lock:
             self.events.append((name, threading.current_thread().name))
+
+
+class BackendFactory:
+    """``backend_factory`` for ``VissimService``: a new ``FakeBackend`` per connect, all of them recorded.
+
+    With ``procs`` (a ``FakeProcs``) every ``Dispatch`` spawns a COM-launched fake Vissim process
+    (``procs.spawn(**spawn_options)``) attached to the created ``FakeVissim``.
+    ``on_dispatch(backend, progid)`` replaces that default. Other keyword arguments go to ``FakeBackend`` (and
+    from there to ``FakeVissim``).
+    """
+
+    def __init__(
+        self,
+        procs: Any | None = None,
+        *,
+        spawn_options: dict[str, Any] | None = None,
+        on_dispatch: Callable[[FakeBackend, str], Any] | None = None,
+        **backend_options: Any,
+    ) -> None:
+        self.procs = procs
+        self.spawn_options = dict(spawn_options or {})
+        self.on_dispatch = on_dispatch
+        self.backend_options = backend_options
+        self.backends: list[FakeBackend] = []
+
+    def __call__(self) -> FakeBackend:
+        backend = FakeBackend(**self.backend_options)
+        if self.on_dispatch is not None:
+            hook = self.on_dispatch
+            backend.on_dispatch = lambda progid: hook(backend, progid)
+        elif self.procs is not None:
+            procs, options = self.procs, self.spawn_options
+            backend.on_dispatch = lambda progid: procs.spawn(**options)
+        self.backends.append(backend)
+        return backend
+
+    @property
+    def last(self) -> FakeBackend:
+        return self.backends[-1]
+
+    def release_all(self) -> None:
+        """End every Dispatch delay and fake COM hang, so that worker threads left behind can finish."""
+        for backend in self.backends:
+            backend.release_dispatch()
+            for vissim in list(backend.instances):
+                vissim.release_hang()
+
+    @property
+    def vissim(self) -> FakeVissim | None:
+        """The FakeVissim of the latest connect (None before a successful Dispatch)."""
+        return self.backends[-1].last if self.backends else None

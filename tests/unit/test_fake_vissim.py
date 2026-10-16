@@ -26,6 +26,7 @@ from fake_vissim import (
     NOISE_MARKER,
     RPC_E_DISCONNECTED,
     RPC_E_WRONG_THREAD,
+    RPC_S_SERVER_UNAVAILABLE,
     SAVE_FORMAT,
     FakeVissim,
     options_from_env,
@@ -703,6 +704,7 @@ def test_options_from_env() -> None:
             "FAKE_VISSIM_EXIT_KEEPS_PROCESS": "1",
             "FAKE_VISSIM_HANG_ON": "LoadNet:30; Simulation.RunContinuous:5",
             "FAKE_VISSIM_SPAWN": '["a.exe", "-Embedding"]',
+            "FAKE_VISSIM_SPAWN_ENV": '{"STANDIN_MODE": "license", "PYTHONPATH": ""}',
         }
     )
     assert options == {
@@ -720,10 +722,13 @@ def test_options_from_env() -> None:
         "exit_keeps_process": True,
         "hang_on": {"LoadNet": 30.0, "Simulation.RunContinuous": 5.0},
         "spawn_cmd": ["a.exe", "-Embedding"],
+        "spawn_env": {"STANDIN_MODE": "license", "PYTHONPATH": ""},
     }
     assert options_from_env({}) == {}
     with pytest.raises(ValueError):
         options_from_env({"FAKE_VISSIM_SPAWN": '"not a list"'})
+    with pytest.raises(ValueError):
+        options_from_env({"FAKE_VISSIM_SPAWN_ENV": '{"N": 1}'})
 
 
 def test_from_env_builds_a_configured_fake() -> None:
@@ -763,6 +768,38 @@ def test_crash_kills_the_spawned_process() -> None:
         fake.process.wait(10)
     finally:
         fake.kill_process()
+
+
+def test_process_end_fails_a_hung_call_and_disconnects() -> None:
+    """Like real COM when the server process is killed: the pending call fails at once, later calls too."""
+    fake = FakeVissim(enforce_thread=False)
+    fake.hang_next_call(30)
+    box: dict[str, Any] = {}
+
+    def hung_call() -> None:
+        try:
+            box["value"] = fake.Net.Links.Count
+        except Exception as exc:  # inspected below
+            box["error"] = exc
+
+    thread = threading.Thread(target=hung_call)
+    thread.start()
+    time.sleep(0.1)
+    started = time.monotonic()
+    fake.process_ended("kill")
+    thread.join(5)
+    assert time.monotonic() - started < 2
+    assert box["error"].hresult == RPC_S_SERVER_UNAVAILABLE
+    with pytest.raises(pywintypes.com_error) as info:
+        _ = fake.Net
+    assert info.value.hresult == RPC_E_DISCONNECTED and fake.crashed
+
+
+def test_process_end_after_exit_is_not_a_crash() -> None:
+    fake = FakeVissim()
+    fake.Exit()
+    fake.process_ended("exit")
+    assert fake.exited and not fake.crashed
 
 
 def test_exit_can_leave_the_process_running() -> None:

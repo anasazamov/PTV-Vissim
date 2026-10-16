@@ -35,6 +35,7 @@ PLAN.md 0-bo'lim, 5-tamoyil: **haqiqiy Vissim'da tasdiqlanmagan nom kodga qattiq
 | `Graphics.CurrentNetworkWindow` | QuickMode | TL, EX | documented |
 | `Simulation.RunContinuous()` / `RunSingleStep()` / `Stop()` | `jobs.py` | TL, EX | documented |
 | `<collection>.Count`, `.ItemByKey(key)`, `.ItemKeyExists(key)` | resolver, `vissim_info`, bulk | TL, EX | documented |
+| `Net.Links`, `.Nodes`, `.SignalControllers`, `.SignalHeads`, `.VehicleInputs`, `.VehicleRoutingDecisionsStatic`, `.DataCollectionMeasurements`, `.VehicleTravelTimeMeasurements`, `.QueueCounters` | `vissim_info` (`Count`; har biri alohida o'qiladi, o'qib bo'lmasa `null` + `errors`) | TL (`INet` a'zolari, 2026-10-16 oflayn qayta tekshirildi) | documented |
 | `<collection>.GetMultipleAttributes(tuple)` | `vissim_list_objects`, `vissim_export_csv` | TL, EX | documented |
 | `<obj>.AttValue(name)` / `.SetAttValue(name, value)` | barcha get/set | TL, EX | documented |
 | `<collection>.Attributes.GetAll()` → `IAttribute.Code/Name/ValueType/Editable` | `vissim_describe(include_attributes=true)` | TL | documented |

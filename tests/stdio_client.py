@@ -33,6 +33,7 @@ class StdioServer:
         self.stdout_lines: list[bytes] = []
         self._stderr_chunks: list[bytes] = []
         self._messages: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._responses: dict[Any, dict[str, Any]] = {}
         self._ids = itertools.count(1)
         self.notifications: list[dict[str, Any]] = []
         self._stdout_thread = threading.Thread(target=self._read_stdout, name="test-stdout", daemon=True)
@@ -92,29 +93,46 @@ class StdioServer:
     def request(
         self, method: str, params: dict[str, Any] | None = None, timeout: float = 15.0
     ) -> dict[str, Any]:
+        return self.wait_response(self.start_request(method, params), timeout=timeout, label=method)
+
+    def start_request(self, method: str, params: dict[str, Any] | None = None) -> int:
+        """Send a request without waiting for its response; returns the request id."""
         request_id = next(self._ids)
         message: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
         if params is not None:
             message["params"] = params
         self.send(message)
+        return request_id
+
+    def start_tool_call(self, name: str, arguments: dict[str, Any] | None = None) -> int:
+        """``tools/call`` without waiting (e.g. a call that will hang); returns the request id."""
+        return self.start_request("tools/call", {"name": name, "arguments": arguments or {}})
+
+    def wait_response(self, request_id: int, timeout: float = 15.0, label: str = "") -> dict[str, Any]:
+        """The response to ``request_id``; responses to other requests that arrive meanwhile are kept."""
+        label = label or f"request {request_id}"
         deadline = time.monotonic() + timeout
         while True:
+            if request_id in self._responses:
+                return self._responses.pop(request_id)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProtocolError(
-                    f"no response to {method} within {timeout} s; stderr:\n{self.stderr_text()}"
+                    f"no response to {label} within {timeout} s; stderr:\n{self.stderr_text()}"
                 )
             try:
                 item = self._messages.get(timeout=remaining)
             except queue.Empty:
                 continue
             if item is None:
+                self._messages.put(None)  # stay at EOF for later waits
                 raise ProtocolError(
-                    f"server closed stdout while waiting for {method}; stderr:\n{self.stderr_text()}"
+                    f"server closed stdout while waiting for {label}; stderr:\n{self.stderr_text()}"
                 )
-            if item.get("id") == request_id and ("result" in item or "error" in item):
-                return item
-            self.notifications.append(item)
+            if "id" in item and ("result" in item or "error" in item):
+                self._responses[item["id"]] = item
+            else:
+                self.notifications.append(item)
 
     def initialize(self) -> dict[str, Any]:
         response = self.request(
@@ -133,11 +151,29 @@ class StdioServer:
     ) -> dict[str, Any]:
         """``tools/call`` -> ``{"result": CallToolResult, "payload": JSON of the first text block}``."""
         response = self.request("tools/call", {"name": name, "arguments": arguments or {}}, timeout=timeout)
+        return self.tool_result(response, name)
+
+    @staticmethod
+    def tool_result(response: dict[str, Any], name: str = "tool") -> dict[str, Any]:
+        """Split a ``tools/call`` response into the CallToolResult and its JSON payload."""
         if "error" in response:
             raise ProtocolError(f"tools/call {name} failed: {response['error']}")
         result = response["result"]
         payload = json.loads(result["content"][0]["text"])
         return {"result": result, "payload": payload}
+
+    def wait_for_health(
+        self, predicate: Any, timeout: float = 15.0, interval: float = 0.02
+    ) -> dict[str, Any]:
+        """Poll ``vissim_health`` until ``predicate(payload)`` is true; returns that payload."""
+        deadline = time.monotonic() + timeout
+        while True:
+            payload = self.call_tool("vissim_health")["payload"]
+            if predicate(payload):
+                return payload
+            if time.monotonic() >= deadline:
+                raise ProtocolError(f"health condition not reached within {timeout} s; last: {payload}")
+            time.sleep(interval)
 
     # --- checks
 

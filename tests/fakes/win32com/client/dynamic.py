@@ -6,7 +6,10 @@ Configured through environment variables, so protocol tests can drive the server
   ProgIDs that raise ``CO_E_CLASSSTRING`` (ProgIDs not starting with ``Vissim.Vissim`` always do).
 * ``FAKE_VISSIM_HANG_S`` - seconds ``Dispatch`` blocks before returning (slow start or a license dialog).
 * ``FAKE_VISSIM_DISPATCH_ERROR`` - HRESULT (e.g. ``-2146959355`` or ``0x80080005``) raised after the hang.
-* every ``FAKE_VISSIM_*`` option of ``fake_vissim.options_from_env`` (noise, network, faults, spawn, ...).
+* ``FAKE_VISSIM_SPAWN`` / ``FAKE_VISSIM_SPAWN_ENV`` - like real COM, the stand-in "Vissim" process starts
+  *before* the hang; if it dies during the hang (e.g. the server killed it because it showed a license
+  dialog), ``Dispatch`` fails with ``CO_E_SERVER_EXEC_FAILURE``. On success it becomes ``FakeVissim.process``.
+* every other ``FAKE_VISSIM_*`` option of ``fake_vissim.options_from_env`` (noise, network, faults, ...).
 """
 
 from __future__ import annotations
@@ -28,9 +31,12 @@ import pythoncom  # noqa: E402 - the fake next to this package
 from fake_vissim import (  # noqa: E402
     CO_E_CLASSSTRING,
     CO_E_NOTINITIALIZED,
+    CO_E_SERVER_EXEC_FAILURE,
     FakeVissim,
     is_registered_progid,
     make_com_error,
+    options_from_env,
+    spawn_standin,
 )
 
 
@@ -50,16 +56,34 @@ def Dispatch(
     env = os.environ
     if _is_bad_progid(progid, env.get("FAKE_VISSIM_BAD_PROGID", "")) or not is_registered_progid(progid):
         raise make_com_error(CO_E_CLASSSTRING)
+    options = options_from_env(env)
+    spawn_cmd = options.pop("spawn_cmd", None)
+    spawn_env = options.pop("spawn_env", None)
+    process = spawn_standin(spawn_cmd, spawn_env) if spawn_cmd else None
     hang_s = float(env.get("FAKE_VISSIM_HANG_S") or 0)
     if hang_s > 0:
-        time.sleep(hang_s)
+        _wait_for_startup(hang_s, process)
     error = (env.get("FAKE_VISSIM_DISPATCH_ERROR") or "").strip()
     if error:
         hresult = int(error, 0)
         if hresult >= 0x8000_0000:
             hresult -= 0x1_0000_0000
-        raise make_com_error(hresult)
-    return FakeVissim.from_env(progid, env)
+        raise make_com_error(hresult)  # like real COM, a failed start may leave the process running
+    vissim = FakeVissim(progid, **options)
+    vissim.process = process
+    return vissim
+
+
+def _wait_for_startup(seconds: float, process: Any) -> None:
+    """Block ``seconds``; fail like COM does when the server process dies before it registered."""
+    deadline = time.monotonic() + seconds
+    while True:
+        if process is not None and process.poll() is not None:
+            raise make_com_error(CO_E_SERVER_EXEC_FAILURE)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.05, remaining))
 
 
 def _is_bad_progid(progid: str, setting: str) -> bool:

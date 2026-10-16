@@ -212,6 +212,18 @@ def is_valid_progid(value: str) -> bool:
     return len(value) <= _PROGID_MAX_LEN and bool(_PROGID_RE.match(value))
 
 
+def forbid_real_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """True while the test-only safety switch ``VISSIM_MCP_FORBID_REAL`` is set (any value but
+    0/false/no/off).
+
+    Read at call time (not part of :class:`Settings`): the real COM backend then refuses to dispatch unless
+    the pywin32 modules are the test fakes, and ``winproc`` never kills or jobs a process named like real
+    Vissim.
+    """
+    value = (os.environ if env is None else env).get(ENV_FORBID_REAL, "")
+    return value.strip().lower() not in ("", *_FALSE_WORDS)
+
+
 def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """Read and validate the configuration from ``env`` (default: ``os.environ``)."""
     if env is None:

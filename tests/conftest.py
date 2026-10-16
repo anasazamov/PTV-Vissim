@@ -6,6 +6,8 @@
   makes the real backend refuse to dispatch (contract section 0).
 * Every test runs with a clean environment: all ``VISSIM_*`` / ``FAKE_VISSIM_*`` variables and
   ``CLAUDE_PROJECT_DIR`` are removed, and log, audit and allowed directories point into ``tmp_path``.
+* In-process services use ``FakeProcs`` (``tests/fake_procs.py``) instead of ``vissim_mcp.winproc``: unit
+  tests never list, kill or put into a job object any real process.
 * ``server_env`` / ``start_server`` run ``python -X utf8 -m vissim_mcp`` as a subprocess against the fakes.
 """
 
@@ -15,6 +17,7 @@ import os
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -38,8 +41,10 @@ if not getattr(pythoncom, "__fake__", False) or not getattr(pywintypes, "__fake_
         "tests/fakes must shadow pywin32 (pythoncom/pywintypes were imported before tests/conftest.py ran)"
     )
 
-from fake_backend import FakeBackend  # noqa: E402
+from fake_backend import BackendFactory, FakeBackend  # noqa: E402
+from fake_procs import FakeProcs  # noqa: E402
 from fake_vissim import FakeVissim  # noqa: E402
+from service_harness import Harness, make_harness  # noqa: E402
 from stdio_client import StdioServer  # noqa: E402
 from vissim_mcp.config import Settings, load_settings  # noqa: E402
 from vissim_mcp.logging_setup import reset_logging  # noqa: E402
@@ -84,11 +89,42 @@ def fake_backend() -> FakeBackend:
 
 
 @pytest.fixture
-def service(settings: Settings) -> Iterator[VissimService]:
-    """VissimService wired to FakeBackend (M1 does not dispatch yet; M2 tests connect through it)."""
-    svc = VissimService(settings, backend_factory=FakeBackend)
+def procs() -> FakeProcs:
+    """In-memory process table standing in for ``vissim_mcp.winproc`` (no real process is ever touched)."""
+    return FakeProcs()
+
+
+@pytest.fixture
+def backends(procs: FakeProcs) -> Iterator[BackendFactory]:
+    """``backend_factory`` whose every Dispatch "starts" a COM-launched fake Vissim process in ``procs``."""
+    factory = BackendFactory(procs)
+    yield factory
+    factory.release_all()
+
+
+@pytest.fixture
+def service(settings: Settings, backends: BackendFactory, procs: FakeProcs) -> Iterator[VissimService]:
+    """VissimService wired to FakeBackend and FakeProcs (never the real winproc)."""
+    svc = VissimService(settings, backend_factory=backends, procs=procs)
     yield svc
     svc.shutdown_fast()
+    backends.release_all()
+
+
+@pytest.fixture
+def harness(isolated_env: dict[str, Path]) -> Iterator[Callable[..., Harness]]:
+    """Factory ``harness(env=None, **fake_options)`` -> ``Harness`` (service + FakeProcs + fake backends with
+    short timings); every harness is shut down and its fakes released at teardown."""
+    made: list[Harness] = []
+
+    def factory(*args: Any, **kwargs: Any) -> Harness:
+        created = make_harness(*args, **kwargs)
+        made.append(created)
+        return created
+
+    yield factory
+    for created in made:
+        created.close()
 
 
 @pytest.fixture

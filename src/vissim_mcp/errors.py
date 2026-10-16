@@ -131,6 +131,8 @@ E_INVALIDARG = -2147024809  # 0x80070057 invalid argument
 DISCONNECTED_HRESULTS = frozenset({RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE, CO_E_OBJNOTCONNECTED})
 
 _RESTART_HINT = "Vissim was closed or crashed (the COM connection is gone). Call vissim_restart."
+#: Hint for every "the connection is gone" error (disconnect HRESULTs, a vanished Vissim process).
+RESTART_HINT = _RESTART_HINT
 
 HRESULT_HINTS: dict[int, str] = {
     CO_E_CLASSSTRING: (
