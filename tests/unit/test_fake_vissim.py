@@ -26,6 +26,7 @@ from fake_vissim import (
     NOISE_MARKER,
     RPC_E_DISCONNECTED,
     RPC_E_WRONG_THREAD,
+    RPC_S_CALL_FAILED,
     RPC_S_SERVER_UNAVAILABLE,
     SAVE_FORMAT,
     FakeVissim,
@@ -808,6 +809,41 @@ def test_exit_can_leave_the_process_running() -> None:
         fake.Exit()
         time.sleep(0.2)
         assert fake.process is not None and fake.process.poll() is None
+    finally:
+        fake.kill_process()
+        if fake.process is not None:
+            fake.process.wait(10)
+
+
+def test_a_dying_process_can_fail_the_call_in_flight_with_rpc_s_call_failed() -> None:
+    fake = FakeVissim(enforce_thread=False, dead_call_hresult=RPC_S_CALL_FAILED)
+    fake.hang_next_call(30)
+    box: dict[str, Any] = {}
+
+    def hung_call() -> None:
+        try:
+            box["value"] = fake.Net.Links.Count
+        except Exception as exc:  # inspected below
+            box["error"] = exc
+
+    thread = threading.Thread(target=hung_call)
+    thread.start()
+    time.sleep(0.1)
+    fake.process_ended("crash")
+    thread.join(5)
+    assert box["error"].hresult == RPC_S_CALL_FAILED
+
+
+def test_exit_can_end_the_process_later_and_lose_its_reply() -> None:
+    """``exit_process_delay_s``: Vissim needs a moment to shut down; ``exit_error``: the reply of Exit() is
+    lost because the server goes away first (the shutdown still happens)."""
+    fake = FakeVissim(spawn_cmd=sleeper_command(), exit_process_delay_s=0.3, exit_error=RPC_S_CALL_FAILED)
+    try:
+        with pytest.raises(pywintypes.com_error) as info:
+            fake.Exit()
+        assert info.value.hresult == RPC_S_CALL_FAILED and fake.exited
+        assert fake.process is not None and fake.process.poll() is None  # still shutting down
+        fake.process.wait(10)
     finally:
         fake.kill_process()
         if fake.process is not None:

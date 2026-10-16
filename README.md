@@ -46,7 +46,8 @@ qismlari (`pythoncom`, `win32com`) import qilinmaydi — COM faqat `vissim_conne
   (`tests/protocol/noisy_launcher.py`; production kodida test uchun maxsus ilgak yo'q).
 - stdin yopilgandan keyin jarayon **300 ms** ichida chiqishi o'lchanadi (o'lchov `stdin.close()` dan oldin
   boshlanadi; CI uchun qo'shimcha "zaxira" berilmagan). Mahalliy o'lchov (30 marta): 6–7 ms; COM worker osilib
-  qolgan holatda (soxta `Dispatch` yoki tool chaqiruvi bloklangan, 8 marta): 110–125 ms.
+  qolgan holatda (soxta `Dispatch` yoki tool chaqiruvi bloklangan, 8 marta): 110–125 ms; stand-in jarayon
+  ulangan va tool chaqiruvi osilib qolgan holatda (stdin yopilganda jarayon haqiqatan o'ldiriladi): 112–124 ms.
 - `tests/unit/test_worker.py`, `test_service_lifecycle.py`, `test_winproc.py`, `test_lifecycle_tools.py`,
   `test_backend.py` (M2) — PLAN 10.1 dagi worker/service/winproc qatorlari: timeout → `TIMEOUT_HUNG`, timeout'dan
   keyin `health.busy_seconds > 0`, restart → `generation` +1 va ishlayotgan job `aborted`, simulyatsiya bo'laklari
@@ -61,6 +62,12 @@ qismlari (`pythoncom`, `win32com`) import qilinmaydi — COM faqat `vissim_conne
   (`FAKE_VISSIM_PRINT_STDOUT=1`); osilib qolgan `Dispatch` (`FAKE_VISSIM_HANG_S`) yoki tool chaqiruvi paytida stdin
   yopilsa ham chiqish ≤ 300 ms. Bu testlarda `VISSIM_EXE_PATTERN` hech bir haqiqiy dasturga mos kelmaydigan
   nomga qo'yiladi — server haqiqiy jarayonlarni o'qimaydi ham.
+- `tests/protocol/test_standin_protocol.py` (faqat Windows) — haqiqiy jarayon zanjiri server ichida: soxta
+  `Dispatch` zararsiz "stand-in" jarayonini ochadi (asosiy `python.exe` nusxasi, nomi
+  `vissim_mcp_test_standin.exe`, buyruq qatorida `-Embedding`; nomi haqiqiy `Vissim*.exe` ga hech qachon mos
+  kelmaydi). Tekshiriladi: psutil orqali PID aniqlash, kill-on-close Job Object, `vissim_restart` eski nusxani
+  o'ldiradi, `vissim_close`, stdin yopilganda nusxa o'ldirilib server ≤ 300 ms da chiqadi, server keskin
+  o'ldirilganda (stdin EOF'siz) nusxani Job Object yopadi (nazorat: Job Object'siz nusxa tirik qoladi).
 - `tests/real` (M6) — `@pytest.mark.vissim`, standart holatda o'tkazib yuboriladi (`-m "not vissim"`).
 
 Soxta COM qatlami:
@@ -83,32 +90,59 @@ Soxta COM qatlami:
   ulanmaydi). `Dispatch` worker oqimida bajariladi; kutish paytida server yangi `-Embedding` jarayonlarni va
   ularning oynalarini kuzatadi: litsenziya oynasi ("License not found", "Управление лицензиями") chiqsa — faqat
   o'zi ochgan **yagona** yangi jarayonni yopadi va tushunarli `COM_ERROR` qaytaradi; `VISSIM_CONNECT_TIMEOUT_S`
-  o'tsa — `TIMEOUT_HUNG`. Muvaffaqiyatda PID aniqlanadi (PLAN 6.4: 1 ta yangi → o'sha; bir nechta → eng yangisi +
-  ogohlantirish; 0 → `pid=null` + ogohlantirish) va jarayon kill-on-close Job Object'ga biriktiriladi.
+  o'tsa — `TIMEOUT_HUNG`. Muvaffaqiyatda PID aniqlanadi (PLAN 6.4) va jarayon kill-on-close Job Object'ga
+  biriktiriladi. Egalik isboti — buyruq qatoridagi `-Embedding` (M0: COM ochgan Vissim'da u doim bor):
+  - 1 ta yangi jarayon, buyruq qatorida `-Embedding` bor → o'sha PID;
+  - 1 ta yangi jarayon, buyruq qatorini o'qib bo'lmadi (AccessDenied) → PLAN 6.4 bo'yicha o'sha PID, lekin
+    "egalik tasdiqlanmadi" ogohlantirishi bilan;
+  - 1 ta yangi jarayon, buyruq qatori o'qildi, lekin `-Embedding` yo'q (foydalanuvchi o'sha paytda o'zi ochgan
+    oyna) → **qabul qilinmaydi**: `pid=null`, Job Object yo'q, ogohlantirish "a new Vissim process without
+    -Embedding appeared during connect; it was not adopted"; bunday jarayon hech qachon o'ldirilmaydi;
+  - bir nechta → eng yangi `-Embedding` li (u bo'lmasa — buyruq qatori o'qilmagan eng yangisi) + ogohlantirish;
+    `-Embedding` siz jarayon tanlanmaydi; 0 → `pid=null` + ogohlantirish.
 - `vissim_health` — COM'siz, darhol javob beradi: ulanish, PID, `generation`, `busy_seconds`/`current_task`
   (osilib qolgan COM chaqiruvi), navbat, job, sozlamalar, oxirgi xato.
 - `vissim_info` — asosiy kolleksiyalar soni (har biri alohida o'qiladi; o'qib bo'lmasa `null` + `errors`),
   `SimPeriod`, `SimRes`.
 - `vissim_restart` — o'z Vissim'ini o'ldiradi, eski worker'ni tashlab yuboradi (`generation` +1, uning kech
   kelgan natijalari e'tiborsiz), ishlayotgan job'ni `aborted` qiladi va yangidan ulanadi. Modal dialog tufayli
-  osilib qolgan yoki qulagan Vissim'ni MCP serverni qayta ishga tushirmasdan tiklaydi.
+  osilib qolgan yoki qulagan Vissim'ni MCP serverni qayta ishga tushirmasdan tiklaydi. Eski Vissim o'ldirilmagan
+  bo'lsa (PID noma'lum, kill rad etildi — masalan, Vissim administrator sifatida ishlayapti — yoki kill'dan keyin
+  ham tirik) — ogohlantirish beriladi va `vissim_health` da ham ko'rinadi. Yangi ishga tushirish muvaffaqiyatsiz
+  bo'lsa, xato `details` ida eski Vissim haqidagi ma'lumot qoladi (`previous_pid`, `previous_killed`,
+  `aborted_job_id`, `previous_warnings`); eski nusxa hali ishlayotgan bo'lishi mumkin bo'lsa, xabarda aytiladi
+  (bitta litsenziya seat'ida aynan u yangi nusxaga xalaqit beradi).
 - `vissim_close` — `Exit()` → 10 s gacha kutish → `terminate` → `kill`; javobda `method`. Saqlash parametri yo'q.
+  `Exit()` COM xatosi bilan tugasa ham (masalan, `RPC_S_CALL_FAILED` — Vissim yopilayotganda javob yo'lda
+  yo'qoladi) jarayon avval 10 s kutiladi, ya'ni normal yopilayotgan Vissim majburan tugatilmaydi; `Exit()` javob
+  bermay turganda jarayon tugasa — darhol `method: "exit"`. PID noma'lum bo'lsa server hech narsani tugatmaydi va
+  buni ochiq aytadi. Chaqiruv bekor qilinsa (masalan, "Save changes?" dialogi paytida) — ulanish "uzilgan"
+  holatda qoladi (worker tashlab yuboriladi, PID saqlanadi): keyingi `vissim_close`, `vissim_connect`,
+  `vissim_restart` yoki server yopilishi o'sha Vissim'ni yopadi.
 - Har bir COM chaqiruvi watchdog bilan (`VISSIM_CALL_TIMEOUT_S`): muddat o'tsa `TIMEOUT_HUNG` ("Vissim'da modal
   dialog ochiq bo'lishi mumkin — oynani tekshiring yoki `vissim_restart`"). COM xatolari HRESULT bo'yicha
   `COM_ERROR` ga aylanadi; ulanish uzilgani (`RPC_E_DISCONNECTED` va h.k. yoki Vissim jarayoni yo'qolgani)
-  aniqlansa, `connected=false` va `vissim_restart` tavsiya qilinadi.
+  aniqlansa, `connected=false` va `vissim_restart` tavsiya qilinadi. `RPC_S_CALL_FAILED` (chaqiruv yo'lda
+  yo'qoldi) o'zi uzilish isboti emas: PID ma'lum bo'lsa, jarayon qisqa vaqt (1 s) kuzatiladi va tugagan bo'lsa
+  ulanish uzilgan deb belgilanadi; PID noma'lum bo'lsa — keyingi chaqiruv aniqlaydi. Vissim jarayoni yo'qolgan
+  "ulangan" holatda `vissim_connect` `ALREADY_CONNECTED` bermaydi — eski ulanishni tashlab, yangisini ochadi.
+- Simulyatsiya bo'lagi (`tick`, M4) xato o'rniga istisno ko'tarsa, job bir marta `error` holatiga o'tkaziladi va
+  qayta "tick" qilinmaydi (traceback log'ga bir marta yoziladi) — har 50 ms takrorlanadigan xato sikli bo'lmaydi.
 
 Xavfsizlik qoidalari:
 
-- Server faqat o'ziniki ekani isbotlangan jarayonni o'ldiradi: `Dispatch` dan oldingi/keyingi jarayonlar farqi +
-  `VISSIM_EXE_PATTERN` + ishga tushgan vaqt (PID qayta ishlatilishidan himoya). PID aniqlanmasa — hech narsa
-  o'ldirilmaydi va Job Object ishlatilmaydi. Ulanish xatosidagi tozalash qo'shimcha ravishda `-Embedding` buyruq
-  qatorini talab qiladi va faqat bitta nomzod bo'lsa ishlaydi.
+- Server faqat o'ziniki deb qabul qilingan jarayonni o'ldiradi: `Dispatch` dan oldingi/keyingi jarayonlar farqi +
+  `VISSIM_EXE_PATTERN` + buyruq qatoridagi `-Embedding` (o'qib bo'lmasa — ogohlantirish bilan, yuqoriga qarang) +
+  ishga tushgan vaqt (PID qayta ishlatilishidan himoya). PID aniqlanmasa yoki jarayon qabul qilinmasa — hech narsa
+  o'ldirilmaydi va Job Object ishlatilmaydi. Ulanish xatosidagi tozalash `-Embedding` ni albatta talab qiladi va
+  faqat bitta nomzod bo'lsa ishlaydi.
 - stdin yopilganda (Claude Code sessiyasi tugaganda): yangi vazifalar rad etiladi → `VISSIM_KILL_ON_EXIT=1` va
   PID ma'lum bo'lsa Vissim darhol o'ldiriladi → worker'ga 100 ms dan ortiq kutilmaydi → log flush → chiqish.
   Server qanday o'lmasin (hatto jarayon daraxti o'ldirilsa ham), Job Object Vissim'ni Windows orqali yopadi.
-  Job'da `KILL_ON_JOB_CLOSE` bilan birga `BREAKAWAY_OK` ham yoqilgan: Vissim o'zi `CREATE_BREAKAWAY_FROM_JOB`
-  bilan ochmoqchi bo'lgan yordamchi jarayon rad etilmaydi (Vissim'ning o'zi baribir job ichida qoladi).
+  Job faqat `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (0x2000) bilan yaratiladi (PLAN 6.4): Vissim ochgan barcha
+  jarayonlar job ichida qoladi va u bilan birga tugaydi; `CREATE_BREAKAWAY_FROM_JOB` bilan ochilmoqchi bo'lgan
+  jarayonni Windows rad etadi. Haqiqiy Vissim bunga muhtojmi — M6 da tekshiriladi
+  ([`docs/com-names.md`](docs/com-names.md)).
 - Test rejimida (`VISSIM_MCP_FORBID_REAL=1`) haqiqiy `Vissim*.exe` hech qachon o'ldirilmaydi va Job Object'ga
   qo'shilmaydi, haqiqiy COM `Dispatch` esa rad etiladi.
 

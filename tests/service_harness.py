@@ -62,6 +62,7 @@ def fast_timings(service: VissimService) -> VissimService:
     service.close_terminate_wait_s = 0.5
     service.close_kill_wait_s = 0.5
     service.restart_kill_wait_s = 0.5
+    service.call_failed_grace_s = 0.2
     return service
 
 
@@ -93,8 +94,9 @@ async def eventually(predicate: Callable[[], Any], timeout: float = WAIT_S, inte
 class StubJob:
     """Minimal simulation job (the service's ``SimulationJobHook``): every tick reads ``SimSec`` through COM.
 
-    ``block`` (an Event) makes a tick wait until it is set - a long simulation chunk; ``fail`` is raised by
-    every tick.
+    ``block`` (an Event) makes a tick wait until it is set - a long simulation chunk; ``raises`` is raised by
+    every tick after that (a tick that fails to record its own error). ``tick_calls`` counts every tick,
+    ``ticks`` the successful ones; ``failures`` records the service's ``fail()`` calls.
     """
 
     def __init__(
@@ -104,29 +106,36 @@ class StubJob:
         state: str = "running",
         *,
         block: threading.Event | None = None,
-        fail: BaseException | None = None,
+        raises: BaseException | None = None,
     ) -> None:
         self.id = job_id
         self.generation = generation
         self.state = state
         self.block = block
-        self.fail = fail
+        self.raises = raises
         self.ticks = 0
+        self.tick_calls = 0
         self.threads: set[str] = set()
         self.abort_reasons: list[str] = []
+        self.failures: list[dict[str, Any]] = []
 
     def tick(self, vissim: Any, settings: Settings) -> None:
+        self.tick_calls += 1
         self.threads.add(threading.current_thread().name)
-        if self.fail is not None:
-            raise self.fail
         vissim.Simulation.AttValue("SimSec")
         if self.block is not None:
             self.block.wait(WAIT_S)
+        if self.raises is not None:
+            raise self.raises
         self.ticks += 1
 
     def abort(self, reason: str) -> None:
         self.abort_reasons.append(reason)
         self.state = "aborted"
+
+    def fail(self, error: dict[str, Any]) -> None:
+        self.failures.append(error)
+        self.state = "error"
 
     def snapshot(self) -> dict[str, Any]:
         return {

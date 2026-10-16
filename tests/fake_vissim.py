@@ -24,7 +24,12 @@ Fault injection (test API, not COM):
   ``WriteFile``);
 * ``stale_break_at`` - an old break point that is still honoured once; ``ignore_break`` - ``SimBreakAt`` is
   ignored; ``stall_runs`` - ``RunContinuous`` returns without advancing;
-* ``crash()`` / ``crash_after_calls`` - later calls raise ``RPC_E_DISCONNECTED``.
+* ``crash()`` / ``crash_after_calls`` - later calls raise ``RPC_E_DISCONNECTED``;
+* ``dead_call_hresult`` - what a call in flight fails with when the process dies (default
+  ``RPC_S_SERVER_UNAVAILABLE``; ``RPC_S_CALL_FAILED`` is the other common real-COM outcome);
+* ``exit_keeps_process`` / ``exit_process_delay_s`` / ``exit_error`` - after ``Exit()`` the process stays,
+  ends only after a delay, or ``Exit()`` itself fails (e.g. ``RPC_S_CALL_FAILED``: the server went away
+  before its reply arrived).
 
 COM objects are bound to the thread that created them (``RPC_E_WRONG_THREAD`` otherwise), like STA objects.
 """
@@ -83,6 +88,7 @@ TYPE_E_ELEMENTNOTFOUND = -2147319765
 RPC_E_DISCONNECTED = -2147417848
 RPC_E_WRONG_THREAD = -2147417842
 RPC_S_SERVER_UNAVAILABLE = -2147023174
+RPC_S_CALL_FAILED = -2147023170
 CO_E_CLASSSTRING = -2147221005
 CO_E_NOTINITIALIZED = -2147221008
 CO_E_SERVER_EXEC_FAILURE = -2146959355
@@ -100,6 +106,7 @@ HRESULT_TEXT = {
     RPC_E_DISCONNECTED: "The object invoked has disconnected from its clients.",
     RPC_E_WRONG_THREAD: "The application called an interface that was marshalled for a different thread.",
     RPC_S_SERVER_UNAVAILABLE: "The RPC server is unavailable.",
+    RPC_S_CALL_FAILED: "The remote procedure call failed.",
     CO_E_CLASSSTRING: "Invalid class string",
     CO_E_NOTINITIALIZED: "CoInitialize has not been called.",
     CO_E_SERVER_EXEC_FAILURE: "Server execution failed",
@@ -1115,6 +1122,9 @@ class FakeVissim(FakeComObject):
         no_type_info: bool = False,
         reject_non_ascii_paths: bool = False,
         exit_keeps_process: bool = False,
+        exit_process_delay_s: float = 0.0,
+        exit_error: int | None = None,
+        dead_call_hresult: int = RPC_S_SERVER_UNAVAILABLE,
         spawn_cmd: Sequence[str] | None = None,
         spawn_env: Mapping[str, str] | None = None,
         hang_on: Mapping[str, float] | None = None,
@@ -1136,6 +1146,9 @@ class FakeVissim(FakeComObject):
         self.no_type_info = no_type_info
         self.reject_non_ascii_paths = reject_non_ascii_paths
         self.exit_keeps_process = exit_keeps_process
+        self.exit_process_delay_s = float(exit_process_delay_s)
+        self.exit_error = exit_error
+        self.dead_call_hresult = dead_call_hresult
 
         self._lock = threading.Lock()
         self._owner_thread = threading.get_ident()
@@ -1212,7 +1225,7 @@ class FakeVissim(FakeComObject):
             if seconds:
                 self._hang_release.wait(seconds)
                 if self._crashed:  # the process died during the hung call (e.g. it was killed)
-                    raise make_com_error(RPC_S_SERVER_UNAVAILABLE)
+                    raise make_com_error(self.dead_call_hresult)
         if pending_error is not None:
             raise pending_error
 
@@ -1280,8 +1293,7 @@ class FakeVissim(FakeComObject):
         """The stand-in process ended (``how`` = exit, terminate, kill, crash).
 
         Except after ``Exit()`` this is a lost server: later calls raise ``RPC_E_DISCONNECTED`` and a hung
-        call fails at once with ``RPC_S_SERVER_UNAVAILABLE`` - like real COM when the Vissim process is
-        killed.
+        call fails at once with ``dead_call_hresult`` - like real COM when the Vissim process is killed.
         """
         if how != "exit" or not self._exited:
             with self._lock:
@@ -1447,7 +1459,14 @@ class FakeVissim(FakeComObject):
             self._exited = True
             self._sim_active = False
         if not self.exit_keeps_process:
-            self.terminate_process()
+            if self.exit_process_delay_s > 0:  # Vissim needs a moment to shut down
+                timer = threading.Timer(self.exit_process_delay_s, self.terminate_process)
+                timer.daemon = True
+                timer.start()
+            else:
+                self.terminate_process()
+        if self.exit_error is not None:  # the server went away before its reply arrived
+            raise make_com_error(self.exit_error)
 
     @com_method
     def SuspendUpdateGUI(self) -> None:

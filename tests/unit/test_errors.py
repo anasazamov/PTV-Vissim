@@ -45,6 +45,8 @@ SDK_HRESULTS = {
     "CO_E_NOTINITIALIZED": 0x800401F0,
     "RPC_E_DISCONNECTED": 0x80010108,
     "RPC_S_SERVER_UNAVAILABLE": 0x800706BA,
+    "RPC_S_CALL_FAILED": 0x800706BE,
+    "RPC_S_CALL_FAILED_DNE": 0x800706BF,
     "CO_E_SERVER_EXEC_FAILURE": 0x80080005,
     "RPC_E_CALL_REJECTED": 0x80010001,
     "RPC_E_SERVERCALL_RETRYLATER": 0x8001010A,
@@ -227,6 +229,23 @@ def test_disconnect_detection_also_looks_at_scode() -> None:
     assert is_disconnect_error(com_error(errors.RPC_S_SERVER_UNAVAILABLE))
     assert not is_disconnect_error(com_error(errors.E_FAIL))
     assert not is_disconnect_error(RuntimeError("not a com error"))
+
+
+def test_a_call_that_failed_in_transit_is_a_connection_error_but_no_proven_disconnect() -> None:
+    """RPC_S_CALL_FAILED (an out-of-process call lost while the server exits or crashes) - the service decides
+    by the Vissim process, so it is not in DISCONNECTED_HRESULTS (contract section 4)."""
+    for hresult in (errors.RPC_S_CALL_FAILED, errors.RPC_S_CALL_FAILED_DNE):
+        exc = com_error(hresult)
+        assert errors.is_call_failed_error(exc) and errors.is_connection_error(exc)
+        assert not is_disconnect_error(exc)
+        assert hresult not in DISCONNECTED_HRESULTS
+        assert "vissim_restart" in from_com_error(exc).hint
+    excepinfo = (0, "Vissim", "lost", None, 0, errors.RPC_S_CALL_FAILED)
+    wrapped = com_error(errors.DISP_E_EXCEPTION, "x", excepinfo)
+    assert errors.is_call_failed_error(wrapped)
+    assert errors.is_connection_error(com_error(errors.RPC_E_DISCONNECTED))
+    assert not errors.is_connection_error(com_error(errors.E_FAIL))
+    assert not errors.is_call_failed_error(RuntimeError("not a com error"))
 
 
 def test_unsigned_hresults_are_normalised() -> None:

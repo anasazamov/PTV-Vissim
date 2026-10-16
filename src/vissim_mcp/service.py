@@ -8,8 +8,9 @@ COM work is a function submitted to the worker (``call``).
   watchdog (license dialog, ``VISSIM_CONNECT_TIMEOUT_S``, cancellation) -> PID detection -> Job Object.
 * ``call`` - submit + watchdog (``TIMEOUT_HUNG``), COM error mapping, disconnect detection, late results of a
   replaced worker are discarded.
-* ``restart`` - kill the known PID, abandon the worker, abort the job, connect again.
-* ``close`` - ``Exit()`` -> wait up to 10 s -> terminate -> kill, identity-checked.
+* ``restart`` - kill the known PID, abandon the worker, abort the job, connect again; when the new start
+  fails, the error still reports what happened to the previous Vissim.
+* ``close`` - ``Exit()`` -> wait up to 10 s -> terminate -> kill, identity-checked; cancellation-safe.
 * ``health`` - COM-free snapshot; ``shutdown_fast`` - the bounded exit sequence (stdin EOF).
 
 Safety: a process is killed only when its PID is known *and* it still has the recorded name and create time
@@ -18,7 +19,8 @@ the process list could not be read before ``Dispatch``, nothing is killed.
 
 Simulation jobs (M4) plug in through ``self.jobs`` (a registry with a ``current`` job, see
 :class:`JobRegistryHook`): the worker's background step ticks the current job when it is ``running`` and
-belongs to the worker's generation; ``restart``/``close`` abort it.
+belongs to the worker's generation; ``restart``/``close`` abort it. A ``tick`` that raises fails its job once
+instead of being retried every poll.
 """
 
 from __future__ import annotations
@@ -46,7 +48,9 @@ from .errors import (
     ErrorCode,
     VissimMcpError,
     from_com_error,
+    is_call_failed_error,
     is_com_error,
+    is_connection_error,
     is_disconnect_error,
 )
 from .logging_setup import flush_logging
@@ -61,6 +65,15 @@ EXIT_TASK = "Exit"
 #: Task name prefix of background steps (simulation chunks) shown in health and TIMEOUT_HUNG messages.
 CHUNK_TASK_PREFIX = "simulation chunk"
 ABORTED_STATE = "aborted"
+ERROR_STATE = "error"
+# How Exit() went in vissim_close. After a *delivered* Exit() (it returned, or failed with a COM error) the
+# service waits up to close_exit_wait_s for the process before it escalates to terminate/kill (PLAN 6.4).
+_EXIT_RETURNED = "returned"
+_EXIT_GONE = "gone"  # Vissim went away while answering (disconnect / call failed in transit / process ended)
+_EXIT_FAILED = "failed"  # another COM error
+_EXIT_TIMEOUT = "timeout"  # no answer within close_exit_call_timeout_s (a dialog?) - the process was watched
+_EXIT_NOT_RUN = "not_run"  # Exit() was never executed
+_EXIT_DELIVERED = frozenset({_EXIT_RETURNED, _EXIT_GONE, _EXIT_FAILED})
 _JOB_SUMMARY_KEYS = ("job_id", "state", "run", "runs", "simsec", "percent")
 _ACTIVE_JOB_STATES = ("running", "paused")
 _LICENSE_HINT = HRESULT_HINTS[CO_E_SERVER_EXEC_FAILURE]
@@ -84,6 +97,13 @@ class SimulationJobHook(Protocol):
     def abort(self, reason: str) -> None:
         """Mark the job ``aborted`` (called from the event loop thread; idempotent)."""
 
+    def fail(self, error: dict[str, Any]) -> None:
+        """Mark the job ``error`` with ``error`` (``{code, message, hint?, details?}``).
+
+        Optional. Called on the worker thread by the service's safety net when ``tick`` raised instead of
+        recording its own error; without this method the job is aborted instead.
+        """
+
     def snapshot(self) -> dict[str, Any]:
         """COM-free status (``job_id, state, run, runs, simsec, percent, ...``)."""
 
@@ -100,9 +120,15 @@ class _Discarded:
 
     pid: int | None = None
     create_time: float | None = None
+    existed: bool = False  # there was a connection (or a lost one) to drop
     killed: bool = False
+    may_still_run: bool = False  # the previous Vissim was not proven ended (PID unknown, kill refused, ...)
     aborted_job_id: str | None = None
     warnings: list[str] = field(default_factory=list)
+
+
+class _ComRootReleased(VissimMcpError):
+    """A call reached a worker whose COM root is gone (``ctx.vissim`` is None)."""
 
 
 def _package_version(name: str) -> str | None:
@@ -149,14 +175,26 @@ def _dispatch_task(progid: str, ctx: WorkerContext) -> None:
     ctx.vissim = ctx.backend.dispatch(progid)
 
 
-def _exit_task(ctx: WorkerContext) -> None:
+def _exit_task(ctx: WorkerContext) -> bool:
+    """``Exit()`` on the COM root; False when there was no root to call (nothing was done)."""
     vissim = ctx.vissim
     if vissim is None:
-        return
+        return False
     try:
         vissim.Exit()
     finally:
         ctx.vissim = None
+    return True
+
+
+def _with_vissim(fn: Callable[[WorkerContext], Any], ctx: WorkerContext) -> Any:
+    """Every ``call()`` task needs the COM root; without it (released by ``Exit()``) fail with NOT_CONNECTED
+    instead of an ``AttributeError`` deep inside the task."""
+    if ctx.vissim is None:
+        raise _ComRootReleased(
+            ErrorCode.NOT_CONNECTED, "the Vissim COM object of this connection was already released"
+        )
+    return fn(ctx)
 
 
 class VissimService:
@@ -170,6 +208,8 @@ class VissimService:
     close_kill_wait_s = 5.0
     restart_kill_wait_s = 5.0
     process_poll_s = 0.1
+    #: After RPC_S_CALL_FAILED the Vissim process may still be ending: watch it this long before deciding.
+    call_failed_grace_s = 1.0
 
     def __init__(
         self,
@@ -214,6 +254,10 @@ class VissimService:
         self._cleanup_killed_pid: int | None = None
         self._job_object: Any | None = None
         self._job_attempts: dict[tuple[int, float | None], tuple[bool, str | None]] = {}
+        # Background safety net (written on the worker thread): the job whose tick raised is never ticked
+        # again; the generation whose background step itself raised was logged with a traceback once.
+        self._failed_tick_job: Any | None = None
+        self._background_error_generation: int | None = None
 
     # --- health
 
@@ -260,10 +304,10 @@ class VissimService:
             return None
 
     def _job_summary(self) -> dict[str, Any] | None:
-        current = getattr(self.jobs, "current", None) if self.jobs is not None else None
-        if current is None:
-            return None
         try:
+            current = getattr(self.jobs, "current", None) if self.jobs is not None else None
+            if current is None:
+                return None
             snapshot = current.snapshot()
         except Exception:
             log.debug("job snapshot failed", exc_info=True)
@@ -279,24 +323,29 @@ class VissimService:
 
         Errors: ``SHUTTING_DOWN``, ``NOT_CONNECTED``, ``TIMEOUT_HUNG`` (the worker stays busy - COM calls
         cannot be interrupted - and ``health`` shows ``busy_seconds``), ``COM_ERROR`` (mapped by HRESULT; a
-        disconnect marks the connection lost). ``VissimMcpError`` raised by ``fn`` passes through unchanged;
-        any other exception of ``fn`` propagates (the tool wrapper reports it as ``INTERNAL``).
+        disconnect, or a failed call whose Vissim process is gone, marks the connection lost).
+        ``VissimMcpError`` raised by ``fn`` passes through unchanged; any other exception of ``fn`` propagates
+        (the tool wrapper reports it as ``INTERNAL``).
         """
         self._check_not_shutting_down()
         worker = self.worker
         if not self.connected or worker is None:
             raise self._not_connected_error()
         timeout = self.settings.call_timeout_s if timeout_s is None else float(timeout_s)
-        future = worker.submit(fn, task_name)
+        future = worker.submit(functools.partial(_with_vissim, fn), task_name)
         try:
             done, result = await _wait_for_worker(future, timeout)
+        except _ComRootReleased as err:
+            self._raise_if_superseded(worker, task_name)
+            self._mark_disconnected(worker, err, task_name)
+            raise
         except VissimMcpError:
             self._raise_if_superseded(worker, task_name)
             raise
         except Exception as exc:
             self._raise_if_superseded(worker, task_name)
             if is_com_error(exc):
-                raise self._com_error(worker, exc, task_name) from None
+                raise await self._com_error(worker, exc, task_name) from None
             raise
         if not done:
             raise self._timeout_error(worker, task_name, timeout)
@@ -343,15 +392,29 @@ class VissimService:
         log.warning("%s", message)
         return error
 
-    def _com_error(self, worker: Any, exc: BaseException, task_name: str) -> VissimMcpError:
+    async def _com_error(self, worker: Any, exc: BaseException, task_name: str) -> VissimMcpError:
         error = from_com_error(exc)
-        gone = is_disconnect_error(exc) or self._vissim_alive() is False
-        if gone:
+        if await self._connection_gone(exc):
             error.hint = RESTART_HINT
             error.details = {**(error.details or {}), "disconnected": True}
             self._mark_disconnected(worker, error, task_name)
         self._record_error(error, task_name)
         return error
+
+    async def _connection_gone(self, exc: BaseException) -> bool:
+        """Whether a COM error means the Vissim connection is gone.
+
+        A disconnect HRESULT says so by itself. Otherwise the Vissim process decides (when its PID is known):
+        after a call that failed in transit (RPC_S_CALL_FAILED, typical for a server that is exiting or
+        crashing) it is watched for ``call_failed_grace_s``. With an unknown PID such an error alone does not
+        mark the connection lost - the next call reports a real disconnect.
+        """
+        if is_disconnect_error(exc):
+            return True
+        pid, create_time = self.pid, self.pid_create_time
+        if pid is not None and is_call_failed_error(exc):
+            return await self._wait_gone(pid, create_time, self.call_failed_grace_s)
+        return self._vissim_alive() is False
 
     def _mark_disconnected(self, worker: Any, error: VissimMcpError, task_name: str) -> None:
         if worker is not self.worker or not self.connected:
@@ -395,7 +458,8 @@ class VissimService:
     async def connect(self, progid: str | None = None) -> dict[str, Any]:
         """Start a new Vissim through COM and connect to it (PLAN 6.4, 7.1 + start-up watchdog).
 
-        Returns ``{pid, progid, job_object, generation, elapsed_s, warnings}``.
+        Returns ``{pid, progid, job_object, generation, elapsed_s, warnings}``. A connection whose Vissim
+        process is verifiably gone counts as lost (not ``ALREADY_CONNECTED``) and is replaced.
         """
         self._check_not_shutting_down()
         if self.connecting:
@@ -406,13 +470,23 @@ class VissimService:
             )
         async with self._lifecycle_lock:
             self._check_not_shutting_down()
+            prior: list[str] = []
             if self.connected:
-                raise VissimMcpError(
-                    ErrorCode.ALREADY_CONNECTED,
-                    f"Vissim is already connected (PID {self.pid if self.pid is not None else 'unknown'}, "
-                    f"generation {self.generation})",
+                if self._vissim_alive() is not False:
+                    pid_text = self.pid if self.pid is not None else "unknown"
+                    raise VissimMcpError(
+                        ErrorCode.ALREADY_CONNECTED,
+                        f"Vissim is already connected (PID {pid_text}, generation {self.generation})",
+                    )
+                note = (
+                    f"the previous connection was dropped: the Vissim process (PID {self.pid}) was no longer "
+                    "running"
                 )
-            return await self._connect_locked(progid)
+                self._mark_disconnected(
+                    self.worker, VissimMcpError(ErrorCode.NOT_CONNECTED, note), "vissim_connect"
+                )
+                prior.append(note)
+            return await self._connect_locked(progid, prior_warnings=prior)
 
     def _normalize_progid(self, progid: str | None) -> str:
         chosen = (progid or "").strip() or self.settings.progid
@@ -425,15 +499,16 @@ class VissimService:
             )
         return chosen
 
-    async def _connect_locked(self, progid: str | None) -> dict[str, Any]:
+    async def _connect_locked(
+        self, progid: str | None, *, prior_warnings: list[str] | None = None
+    ) -> dict[str, Any]:
         chosen = self._normalize_progid(progid)
-        warnings: list[str] = []
+        warnings: list[str] = list(prior_warnings or [])
         if self.worker is not None or self.pid is not None:  # a lost connection: clean it up first
-            stale = self._discard_connection(kill=True, reason="the previous Vissim connection was lost")
+            stale = await self._discard_and_wait(
+                "the previous Vissim connection was lost", announce_kill=True
+            )
             warnings.extend(stale.warnings)
-            if stale.killed and stale.pid is not None:
-                warnings.append(f"the previous, unresponsive Vissim (PID {stale.pid}) was killed")
-                await self._wait_gone(stale.pid, stale.create_time, self.restart_kill_wait_s)
 
         pattern = self.settings.exe_pattern
         before: dict[int, winproc.ProcInfo] | None
@@ -708,20 +783,22 @@ class VissimService:
     async def restart(self) -> dict[str, Any]:
         """Kill the known Vissim, abandon its worker (generation++), abort the job, connect again (PLAN 6.4).
 
-        Returns the ``connect`` fields plus ``previous_pid``, ``killed`` and ``aborted_job_id``.
+        Returns the ``connect`` fields plus ``previous_pid``, ``killed`` and ``aborted_job_id``; the warnings
+        about the previous Vissim come first (health shows them too). When the new start fails, its error
+        carries ``previous_pid``, ``previous_killed``, ``aborted_job_id`` and ``previous_warnings`` in
+        ``details``, and says so when the previous Vissim may still be running (it may hold the license).
         """
         self._check_not_shutting_down()
         self._request_connect_abort("vissim_restart")
         async with self._lifecycle_lock:
             self._check_not_shutting_down()
             progid = self.progid or self.settings.progid
-            previous = self._discard_connection(kill=True, reason="Vissim was restarted")
-            if previous.killed and previous.pid is not None:
-                if not await self._wait_gone(previous.pid, previous.create_time, self.restart_kill_wait_s):
-                    previous.warnings.append(
-                        f"the previous Vissim (PID {previous.pid}) was still running after the kill"
-                    )
-            result = await self._connect_locked(progid)
+            previous = await self._discard_and_wait("Vissim was restarted")
+            try:
+                result = await self._connect_locked(progid, prior_warnings=previous.warnings)
+            except BaseException as exc:
+                self._report_failed_restart(previous, exc)
+                raise
         log.info(
             "Vissim restarted: previous PID %s (killed %s), new PID %s, generation %d",
             previous.pid,
@@ -734,14 +811,41 @@ class VissimService:
             "previous_pid": previous.pid,
             "killed": previous.killed,
             "aborted_job_id": previous.aborted_job_id,
-            "warnings": [*previous.warnings, *result.get("warnings", [])],
         }
+
+    def _report_failed_restart(self, previous: _Discarded, exc: BaseException) -> None:
+        """The new start of a restart failed: keep what happened to the previous Vissim visible (the error
+        details, the error message when it may still run, and the health warnings)."""
+        if previous.warnings:
+            self.connect_warnings = list(previous.warnings)  # health shows them until the next connect
+        if not previous.existed or not isinstance(exc, VissimMcpError):
+            return
+        details = dict(exc.details or {})
+        details["previous_pid"] = previous.pid
+        details["previous_killed"] = previous.killed
+        if previous.aborted_job_id is not None:
+            details["aborted_job_id"] = previous.aborted_job_id
+        if previous.warnings:
+            details["previous_warnings"] = list(previous.warnings)
+        exc.details = details
+        if previous.may_still_run:
+            which = f"PID {previous.pid}" if previous.pid is not None else "PID unknown"
+            exc.message = (
+                f"{exc.message}; note: the previous Vissim ({which}) was not killed and may still be "
+                "running - with a single license seat it blocks the new instance: close it manually, then "
+                "call vissim_connect"
+            )
+        self._record_error(exc, DISPATCH_TASK)
 
     async def close(self) -> dict[str, Any]:
         """``Exit()`` -> wait <= 10 s for the process -> terminate -> kill (PLAN 6.4, 7.1). No save option.
 
         Returns ``{closed, method (exit|terminate|kill|null), pid, warnings, aborted_job_id?}``. A connect
         that is still starting Vissim is cancelled (and cleaned up) instead.
+
+        Cancellation-safe: if the call is cancelled half-way (e.g. while ``Exit()`` waits behind a "Save
+        changes?" dialog), the connection is left *lost* - not connected, worker abandoned, PID kept - so that
+        vissim_close, vissim_connect, vissim_restart or the shutdown can still end that Vissim.
         """
         self._check_not_shutting_down()
         cancelled_connect = self._request_connect_abort("vissim_close")
@@ -754,41 +858,76 @@ class VissimService:
                 raise VissimMcpError(
                     ErrorCode.NOT_CONNECTED, "Vissim is not connected; there is nothing to close", hint=""
                 )
-            warnings: list[str] = []
-            aborted = self._abort_current_job("Vissim was closed")
-            was_alive = pid is not None and self._pid_alive(pid, create_time)
-            exit_called = False
-            if self.connected and worker is not None and worker.alive and (pid is None or was_alive):
-                exit_called, exit_warning = await self._call_exit(worker)
-                if exit_warning:
-                    warnings.append(exit_warning)
-            self.connected = False
+            try:
+                result = await self._close_locked(worker, pid, create_time)
+            except BaseException:
+                self._abandon_close(worker, pid)
+                raise
+        log.info("vissim_close: closed %s, method %s, PID %s", result["closed"], result["method"], pid)
+        return result
 
-            method: str | None = None
-            closed = False
-            if pid is None:
-                closed = exit_called
-                method = "exit" if exit_called else None
-                warnings.append(
-                    "the Vissim PID is unknown, so the server cannot verify that the process ended"
-                    + ("" if exit_called else "; close Vissim manually")
-                )
-            elif not was_alive:
-                closed = True
-                warnings.append(f"Vissim (PID {pid}) had already exited")
-            else:
-                method = await self._end_process(pid, create_time, exit_called)
-                closed = method is not None
-                if not closed:
-                    warnings.append(f"Vissim (PID {pid}) could not be ended; close it in Task Manager")
-            if worker is not None:
-                worker.stop(ErrorCode.NOT_CONNECTED, "Vissim was closed")
-            self._reset_connection_state()
-        log.info("vissim_close: closed %s, method %s, PID %s", closed, method, pid)
+    async def _close_locked(
+        self, worker: ComWorker | Any | None, pid: int | None, create_time: float | None
+    ) -> dict[str, Any]:
+        warnings: list[str] = []
+        aborted = self._abort_current_job("Vissim was closed")
+        was_alive = pid is not None and self._pid_alive(pid, create_time)
+        outcome: str | None = None  # None: Exit() was not attempted (connection lost, worker gone)
+        if self.connected and worker is not None and worker.alive and (pid is None or was_alive):
+            outcome, exit_warning = await self._call_exit(worker, pid, create_time)
+            if exit_warning:
+                warnings.append(exit_warning)
+        self.connected = False
+
+        method: str | None = None
+        closed = False
+        if pid is None:
+            closed = outcome in (_EXIT_RETURNED, _EXIT_GONE)
+            method = "exit" if closed else None
+            warnings.append(
+                "the Vissim PID is unknown, so the server cannot verify that the process ended"
+                + ("" if closed else "; close Vissim manually")
+            )
+        elif not was_alive:
+            closed = True
+            warnings.append(f"Vissim (PID {pid}) had already exited")
+        else:
+            method = await self._end_process(pid, create_time, wait_first=outcome in _EXIT_DELIVERED)
+            closed = method is not None
+            if not closed:
+                warnings.append(f"Vissim (PID {pid}) could not be ended; close it in Task Manager")
+        if worker is not None:
+            worker.stop(ErrorCode.NOT_CONNECTED, "Vissim was closed")
+        self._reset_connection_state()
         result: dict[str, Any] = {"closed": closed, "method": method, "pid": pid, "warnings": warnings}
         if aborted:
             result["aborted_job_id"] = aborted
         return result
+
+    def _abandon_close(self, worker: ComWorker | Any | None, pid: int | None) -> None:
+        """vissim_close was cancelled (or failed) half-way: leave a consistent *lost connection*.
+
+        The worker is abandoned (a late ``Exit()`` result is ignored, queued calls fail at once); the PID is
+        kept, so the next vissim_close / vissim_connect / vissim_restart or the shutdown can still end this
+        Vissim (identity-checked). Synchronous - it runs in a cancelled task.
+        """
+        self.connected = False
+        if worker is not None:
+            worker.abandon("vissim_close was cancelled; this COM call was discarded")
+        if self.worker is worker:
+            self.worker = None
+        if pid is not None:
+            note = (
+                f"vissim_close was cancelled before it finished; Vissim (PID {pid}) may still be running - "
+                "call vissim_close again or vissim_restart"
+            )
+        else:
+            note = (
+                "vissim_close was cancelled before it finished; Vissim (PID unknown) may still be running - "
+                "close it manually if its window is still open"
+            )
+        self.connect_warnings = [*self.connect_warnings, note]
+        log.warning("%s", note)
 
     def _cancelled_start_result(self) -> dict[str, Any]:
         killed_pid = self._cleanup_killed_pid
@@ -806,28 +945,62 @@ class VissimService:
             "warnings": warnings,
         }
 
-    async def _call_exit(self, worker: ComWorker) -> tuple[bool, str | None]:
-        future = worker.submit(_exit_task, EXIT_TASK)
-        timeout = self.close_exit_call_timeout_s
-        try:
-            done, _result = await _wait_for_worker(future, timeout)
-        except Exception as exc:
-            if is_disconnect_error(exc):
-                return True, None  # Vissim went away while answering Exit() - expected
-            return False, f"Exit() failed ({_short(exc, 160)}); ending the process"
-        if not done:
-            return (
-                False,
-                f"Exit() did not return within {timeout:g} s (Vissim may show a dialog); ending the process",
-            )
-        return True, None
+    async def _call_exit(
+        self, worker: ComWorker | Any, pid: int | None, create_time: float | None
+    ) -> tuple[str, str | None]:
+        """Run ``Exit()`` on the worker; returns ``(outcome, warning)`` (the ``_EXIT_*`` values).
 
-    async def _end_process(self, pid: int, create_time: float | None, exit_called: bool) -> str | None:
-        """Wait for the exit after ``Exit()``, then escalate: terminate -> kill.
+        With a known PID the process is watched meanwhile: when it ends, Exit() did its job, whatever its
+        reply (a reply lost in transit typically surfaces only later as RPC_S_CALL_FAILED). A disconnect or
+        call-failed error is "Vissim went away while answering" (expected); any other COM error still means
+        that Exit() was delivered, so the caller waits for the process before it escalates.
+        """
+        timeout = self.close_exit_call_timeout_s
+        wrapped = asyncio.wrap_future(worker.submit(_exit_task, EXIT_TASK))
+        deadline = time.monotonic() + timeout
+        answered = False
+        try:
+            while True:
+                if wrapped.done():
+                    answered = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                poll = remaining if pid is None else min(self.process_poll_s, remaining)
+                await asyncio.wait({wrapped}, timeout=poll)
+                if not wrapped.done() and pid is not None and not self._pid_alive(pid, create_time):
+                    log.info("Vissim PID %d ended while Exit() was pending", pid)
+                    return _EXIT_GONE, None
+        finally:
+            if not wrapped.done():
+                wrapped.cancel()  # an Exit() that has not started yet is skipped by the worker
+        if not answered:
+            ending = "; ending the process" if pid is not None else ""
+            return (
+                _EXIT_TIMEOUT,
+                f"Exit() did not return within {timeout:g} s (Vissim may show a dialog){ending}",
+            )
+        if wrapped.cancelled():
+            return _EXIT_NOT_RUN, "Exit() was cancelled before it ran"
+        exc = wrapped.exception()
+        if exc is None:
+            if wrapped.result():
+                return _EXIT_RETURNED, None
+            return _EXIT_NOT_RUN, "Exit() was not called: the COM object was already released"
+        if is_connection_error(exc):
+            return _EXIT_GONE, None  # Vissim went away while answering Exit() - expected
+        if is_com_error(exc):
+            return _EXIT_FAILED, f"Exit() failed ({_short(exc, 160)})"
+        return _EXIT_NOT_RUN, f"Exit() could not be called ({_short(exc, 160)})"
+
+    async def _end_process(self, pid: int, create_time: float | None, *, wait_first: bool) -> str | None:
+        """After a delivered ``Exit()`` wait (``close_exit_wait_s``) for the process, then escalate:
+        terminate -> kill (identity-checked).
 
         Returns the method that ended the process, or None when it is still running.
         """
-        if exit_called and await self._wait_gone(pid, create_time, self.close_exit_wait_s):
+        if wait_first and await self._wait_gone(pid, create_time, self.close_exit_wait_s):
             return "exit"
         if not self._pid_alive(pid, create_time):
             return "exit"  # it ended by itself in the meantime
@@ -846,12 +1019,20 @@ class VissimService:
 
     def _discard_connection(self, *, kill: bool, reason: str) -> _Discarded:
         """Drop the current connection: kill the known Vissim (identity-checked), abandon the worker, abort
-        the job and reset the state."""
-        dropped = _Discarded(pid=self.pid, create_time=self.pid_create_time)
-        worker = self.worker
-        if kill and self.pid is not None:
-            dropped.killed = self._kill_process(self.pid, self.pid_create_time, reason)
+        the job and reset the state. Every case in which the previous Vissim may survive gets a warning."""
+        worker, pid, create_time = self.worker, self.pid, self.pid_create_time
+        dropped = _Discarded(pid=pid, create_time=create_time, existed=worker is not None or pid is not None)
+        if kill and pid is not None:
+            dropped.killed = self._kill_process(pid, create_time, reason)
+            if not dropped.killed and self._pid_alive(pid, create_time):
+                dropped.may_still_run = True
+                dropped.warnings.append(
+                    f"the previous Vissim (PID {pid}) is still running and could not be killed (does it "
+                    "run as administrator?); close it manually - with a single license seat a new instance "
+                    "may fail to start"
+                )
         elif kill and worker is not None:
+            dropped.may_still_run = True
             dropped.warnings.append(
                 "the PID of the previous Vissim was not detected, so it was not killed; close it manually "
                 "if it is still open"
@@ -860,6 +1041,20 @@ class VissimService:
             worker.abandon(f"{reason}; this COM call was discarded")
         dropped.aborted_job_id = self._abort_current_job(reason)
         self._reset_connection_state()
+        return dropped
+
+    async def _discard_and_wait(self, reason: str, *, announce_kill: bool = False) -> _Discarded:
+        """``_discard_connection(kill=True)``, then wait (``restart_kill_wait_s``) until a killed Vissim is
+        gone; ``announce_kill`` adds a warning that it was killed (connect cleaning up a lost connection)."""
+        dropped = self._discard_connection(kill=True, reason=reason)
+        if dropped.killed and dropped.pid is not None:
+            if announce_kill:
+                dropped.warnings.append(f"the previous, unresponsive Vissim (PID {dropped.pid}) was killed")
+            if not await self._wait_gone(dropped.pid, dropped.create_time, self.restart_kill_wait_s):
+                dropped.may_still_run = True
+                dropped.warnings.append(
+                    f"the previous Vissim (PID {dropped.pid}) was still running after the kill"
+                )
         return dropped
 
     def _reset_connection_state(self) -> None:
@@ -901,27 +1096,95 @@ class VissimService:
     # --- simulation job hook (M4)
 
     def _background_step(self, ctx: WorkerContext) -> None:
-        """Worker background step: tick the current job when it runs and belongs to this generation."""
+        """Worker background step: tick the current job when it runs and belongs to this connection.
+
+        Nothing is ticked while the connection is lost or the COM root is gone. A ``tick`` that raises
+        (``tick`` should record its own errors, M4 - this is the safety net) fails its job once and that job
+        is never ticked again, so a broken tick cannot turn into an error loop at the worker's poll rate.
+        """
         registry = self.jobs
-        if registry is None or ctx.stopping:
+        if registry is None or ctx.stopping or ctx.vissim is None or not self.connected:
             return
         job = getattr(registry, "current", None)
-        if job is None or getattr(job, "generation", None) != ctx.generation or job.state != "running":
+        if (
+            job is None
+            or job is self._failed_tick_job
+            or getattr(job, "generation", None) != ctx.generation
+            or job.state != "running"
+        ):
             return
-        with ctx.task(f"{CHUNK_TASK_PREFIX} (job {getattr(job, 'id', '?')})", background=True):
-            job.tick(ctx.vissim, self.settings)
+        try:
+            with ctx.task(f"{CHUNK_TASK_PREFIX} (job {getattr(job, 'id', '?')})", background=True):
+                job.tick(ctx.vissim, self.settings)
+        except Exception as exc:
+            self._tick_failed(ctx.generation, job, exc)
 
-    def _on_background_error(self, generation: int, exc: BaseException) -> None:
-        """A background step raised (``tick`` should record its own COM errors - this is the safety net).
+    def _tick_failed(self, generation: int, job: Any, exc: BaseException) -> None:
+        """``job.tick`` raised (worker thread): mark that job failed, report it once, detect a lost Vissim.
 
-        Errors of a replaced generation (e.g. a chunk that failed because restart killed its Vissim) are only
-        logged: they must not touch the state of the current connection.
+        A failure of a replaced generation (e.g. a chunk that failed because restart killed its Vissim) is
+        only logged: it must not touch the state of the current connection.
         """
         worker = self.worker
         if worker is None or getattr(worker, "generation", None) != generation:
             log.info("background step of replaced generation %d failed: %s", generation, _short(exc))
             return
-        log.error("background step failed (generation %d): %s", generation, _short(exc), exc_info=exc)
+        self._failed_tick_job = job
+        job_id = str(getattr(job, "id", None) or "?")
+        if isinstance(exc, VissimMcpError):
+            error = VissimMcpError(exc.code, exc.message, exc.hint or "", exc.details)
+        elif is_com_error(exc):
+            error = from_com_error(exc, context=f"simulation job {job_id}")
+        else:
+            error = VissimMcpError(
+                ErrorCode.INTERNAL, f"simulation job {job_id}: the simulation step failed: {_short(exc)}"
+            )
+        gone = is_disconnect_error(exc) or self._vissim_alive() is False
+        if gone:
+            error.hint = RESTART_HINT
+            error.details = {**(error.details or {}), "disconnected": True}
+        log.error(
+            "simulation job %s failed in a background step (generation %d); the job is stopped: %s",
+            job_id,
+            generation,
+            error.message,
+            exc_info=exc,
+        )
+        self._fail_job(job, error)
+        self._record_error(error, "background step")
+        if gone:
+            self._mark_disconnected(worker, error, "background step")
+
+    def _fail_job(self, job: Any, error: VissimMcpError) -> None:
+        """``job.fail(error)`` (state ``error``); a job without that hook method is aborted instead."""
+        try:
+            fail = getattr(job, "fail", None)
+            if callable(fail):
+                fail(error.to_dict())
+                return
+            abort = getattr(job, "abort", None)
+            if callable(abort):
+                abort(error.message)
+            else:
+                job.state = ERROR_STATE
+        except Exception:
+            log.exception("marking simulation job %s as failed raised", getattr(job, "id", "?"))
+
+    def _on_background_error(self, generation: int, exc: BaseException) -> None:
+        """The worker's safety net: the background step itself raised (a bug outside ``tick``).
+
+        The traceback is logged once per generation (later errors at DEBUG), so a recurring bug cannot flood
+        the logs. Errors of a replaced generation are only logged.
+        """
+        worker = self.worker
+        if worker is None or getattr(worker, "generation", None) != generation:
+            log.info("background step of replaced generation %d failed: %s", generation, _short(exc))
+            return
+        if self._background_error_generation != generation:
+            self._background_error_generation = generation
+            log.error("background step failed (generation %d): %s", generation, _short(exc), exc_info=exc)
+        else:
+            log.debug("background step failed again (generation %d): %s", generation, _short(exc))
         code = ErrorCode.COM_ERROR if is_com_error(exc) else ErrorCode.INTERNAL
         self.last_error = {
             "code": code.value,

@@ -112,6 +112,8 @@ CO_E_CLASSSTRING = -2147221005  # 0x800401F3 "Invalid class string"
 CO_E_NOTINITIALIZED = -2147221008  # 0x800401F0 CoInitialize has not been called
 RPC_E_DISCONNECTED = -2147417848  # 0x80010108 object disconnected from its clients
 RPC_S_SERVER_UNAVAILABLE = -2147023174  # 0x800706BA RPC server unavailable
+RPC_S_CALL_FAILED = -2147023170  # 0x800706BE the remote procedure call failed (reply lost in transit)
+RPC_S_CALL_FAILED_DNE = -2147023169  # 0x800706BF the remote procedure call failed and did not execute
 CO_E_SERVER_EXEC_FAILURE = -2146959355  # 0x80080005 server execution failed
 RPC_E_CALL_REJECTED = -2147418111  # 0x80010001 call rejected by callee
 RPC_E_SERVERCALL_RETRYLATER = -2147417846  # 0x8001010A server busy, retry later
@@ -129,6 +131,10 @@ E_INVALIDARG = -2147024809  # 0x80070057 invalid argument
 
 #: HRESULTs meaning "Vissim is gone": the service marks itself disconnected and suggests vissim_restart.
 DISCONNECTED_HRESULTS = frozenset({RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE, CO_E_OBJNOTCONNECTED})
+#: HRESULTs of a call that failed in transit. An out-of-process server that exits or crashes while a call
+# is in flight (``Exit()`` included) usually produces RPC_S_CALL_FAILED. It does not prove that Vissim is
+# gone, so the service decides by the Vissim process (when its PID is known), not by the HRESULT alone.
+CALL_FAILED_HRESULTS = frozenset({RPC_S_CALL_FAILED, RPC_S_CALL_FAILED_DNE})
 
 _RESTART_HINT = "Vissim was closed or crashed (the COM connection is gone). Call vissim_restart."
 #: Hint for every "the connection is gone" error (disconnect HRESULTs, a vanished Vissim process).
@@ -146,6 +152,14 @@ HRESULT_HINTS: dict[int, str] = {
     RPC_E_DISCONNECTED: _RESTART_HINT,
     RPC_S_SERVER_UNAVAILABLE: _RESTART_HINT,
     CO_E_OBJNOTCONNECTED: _RESTART_HINT,
+    RPC_S_CALL_FAILED: (
+        "The COM call failed in transit - Vissim usually crashed or was closed while executing it. Check "
+        "vissim_health (vissim_alive); if Vissim is gone, call vissim_restart."
+    ),
+    RPC_S_CALL_FAILED_DNE: (
+        "The COM call failed and was not executed - Vissim is probably shutting down or has crashed. Check "
+        "vissim_health; if Vissim is gone, call vissim_restart."
+    ),
     CO_E_SERVER_EXEC_FAILURE: (
         "Vissim started but did not register with COM - usually a modal dialog (license selection or "
         "'License not found') is open. Demo/Student licenses have no COM module; activate a full license and "
@@ -240,10 +254,24 @@ def effective_hresult(exc: BaseException) -> int | None:
 
 def is_disconnect_error(exc: BaseException) -> bool:
     """True when a COM error means the Vissim process/connection is gone."""
+    return _has_hresult(exc, DISCONNECTED_HRESULTS)
+
+
+def is_call_failed_error(exc: BaseException) -> bool:
+    """RPC_S_CALL_FAILED(_DNE): the call failed in transit, typically because the server went away."""
+    return _has_hresult(exc, CALL_FAILED_HRESULTS)
+
+
+def is_connection_error(exc: BaseException) -> bool:
+    """A disconnect or a call that failed in transit: the COM connection may be gone (not a bad call)."""
+    return is_disconnect_error(exc) or is_call_failed_error(exc)
+
+
+def _has_hresult(exc: BaseException, hresults: frozenset[int]) -> bool:
     if not is_com_error(exc):
         return False
     hresult, _, excepinfo = com_error_parts(exc)
-    return hresult in DISCONNECTED_HRESULTS or _excepinfo_scode(excepinfo) in DISCONNECTED_HRESULTS
+    return hresult in hresults or _excepinfo_scode(excepinfo) in hresults
 
 
 def hint_for_hresult(hresult: int | None) -> str:

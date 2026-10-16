@@ -44,6 +44,8 @@ class FakeProcess:
         *,
         survives_terminate: bool = False,
         survives_kill: bool = False,
+        cmdline_readable: bool = True,
+        refuses_end: bool = False,
     ) -> None:
         self._procs = procs
         self.pid = pid
@@ -53,13 +55,16 @@ class FakeProcess:
         self.titles = list(titles)
         self.survives_terminate = survives_terminate
         self.survives_kill = survives_kill
+        self.cmdline_readable = cmdline_readable  # False: reading it fails (AccessDenied): cmdline None
+        self.refuses_end = refuses_end  # kill/terminate are refused (AccessDenied, e.g. an elevated Vissim)
         self.alive = True
         self.ended_by: str | None = None
         self.on_end: list[Callable[[str], None]] = []
 
     @property
     def info(self) -> ProcInfo:
-        return ProcInfo(self.pid, self.name, self.create_time, self.cmdline)
+        cmdline = self.cmdline if self.cmdline_readable else None
+        return ProcInfo(self.pid, self.name, self.create_time, cmdline)
 
     def end(self, how: str) -> None:
         """The process ends (``how`` = exit, terminate, kill, crash); runs the ``on_end`` callbacks once."""
@@ -167,11 +172,14 @@ class FakeProcs:
         create_time: float | None = None,
         survives_terminate: bool = False,
         survives_kill: bool = False,
+        cmdline_readable: bool = True,
+        refuses_end: bool = False,
     ) -> FakeProcess:
         """Add a running process; ``com=True`` gives it the ``-Embedding`` command line of a COM launch.
 
         Create times grow with every spawn (the newest process has the largest one). Passing the ``pid`` of
-        an ended process simulates PID reuse.
+        an ended process simulates PID reuse. ``cmdline_readable=False``: its command line cannot be read
+        (access denied); ``refuses_end``: kill and terminate fail (access denied) and it keeps running.
         """
         with self._lock:
             new_pid = next(self._pids) if pid is None else pid
@@ -187,6 +195,8 @@ class FakeProcs:
                 titles,
                 survives_terminate=survives_terminate,
                 survives_kill=survives_kill,
+                cmdline_readable=cmdline_readable,
+                refuses_end=refuses_end,
             )
             self.table[new_pid] = process
             return process
@@ -234,7 +244,7 @@ class FakeProcs:
     def is_com_launched(self, pid: int) -> bool:
         with self._lock:
             process = self.table.get(pid)
-            return process is not None and winproc.cmdline_is_com_launched(process.cmdline)
+            return process is not None and winproc.cmdline_is_com_launched(process.info.cmdline)
 
     def window_titles(self, pid: int | None) -> list[str]:
         with self._lock:
@@ -253,7 +263,7 @@ class FakeProcs:
             self.kill_calls.append((pid, create_time))
             self._event("kill", pid)
             process = self._verified(pid, create_time, pattern)
-            if process is None:
+            if process is None or process.refuses_end:
                 return False
             self.killed.append(process.pid)
         if not process.survives_kill:
@@ -265,7 +275,7 @@ class FakeProcs:
             self.terminate_calls.append((pid, create_time))
             self._event("terminate", pid)
             process = self._verified(pid, create_time, pattern)
-            if process is None:
+            if process is None or process.refuses_end:
                 return False
             self.terminated.append(process.pid)
         if not process.survives_terminate:

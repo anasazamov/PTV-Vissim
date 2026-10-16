@@ -6,7 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from ..errors import ErrorCode, VissimMcpError, from_com_error, is_com_error, is_disconnect_error
+from ..errors import ErrorCode, VissimMcpError, from_com_error, is_com_error, is_connection_error
 from ..service import VissimService
 from ..worker import WorkerContext
 from ._common import register_tool
@@ -31,7 +31,8 @@ _MAX_ERROR_CHARS = 200
 def read_info(ctx: WorkerContext) -> dict[str, Any]:
     """COM task of vissim_info: collection counts and simulation attributes, each read on its own.
 
-    A value that cannot be read becomes null and is explained in ``errors``; a lost connection is raised.
+    A value that cannot be read becomes null and is explained in ``errors``; a lost connection (also a call
+    that failed in transit) is raised.
     """
     vissim = ctx.vissim
     if vissim is None:
@@ -43,7 +44,7 @@ def read_info(ctx: WorkerContext) -> dict[str, Any]:
         try:
             counts[name] = getattr(net, name).Count
         except Exception as exc:
-            if is_disconnect_error(exc):
+            if is_connection_error(exc):
                 raise
             counts[name] = None
             errors[name] = _describe(exc)
@@ -53,7 +54,7 @@ def read_info(ctx: WorkerContext) -> dict[str, Any]:
         try:
             result[attribute] = simulation.AttValue(attribute)
         except Exception as exc:
-            if is_disconnect_error(exc):
+            if is_connection_error(exc):
                 raise
             result[attribute] = None
             errors[f"Simulation.{attribute}"] = _describe(exc)

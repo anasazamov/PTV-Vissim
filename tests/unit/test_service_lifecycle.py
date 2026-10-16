@@ -7,6 +7,7 @@ real process is ever listed, killed or put into a job object.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -22,11 +23,13 @@ from fake_vissim import (
     E_FAIL,
     E_INVALIDARG,
     RPC_E_DISCONNECTED,
+    RPC_S_CALL_FAILED,
+    RPC_S_SERVER_UNAVAILABLE,
     make_com_error,
 )
 from service_harness import Harness, StubJob, StubRegistry, eventually
 from vissim_mcp.errors import DEFAULT_HINTS, HRESULT_HINTS, RESTART_HINT, ErrorCode, VissimMcpError
-from vissim_mcp.winproc import PID_NOT_DETECTED_WARNING
+from vissim_mcp.winproc import NOT_ADOPTED_WARNING, PID_NOT_DETECTED_WARNING, ownership_unverified_warning
 from vissim_mcp.worker import THREAD_NAME, WorkerContext
 
 MakeHarness = Callable[..., Harness]
@@ -160,6 +163,43 @@ async def test_a_com_launched_process_is_preferred(harness: MakeHarness) -> None
     assert result["warnings"][0].endswith(f"using the COM-launched one, PID {com.pid}")
 
 
+async def test_a_single_new_vissim_without_com_launch_is_not_adopted(harness: MakeHarness) -> None:
+    """The only new Vissim has a readable command line without -Embedding: a window the user opened during
+    the start (M0: a COM-launched Vissim always has -Embedding). It is never adopted, jobbed or killed."""
+    procs = FakeProcs()
+    started: list[Any] = []
+
+    def user_opens_vissim(backend: Any, progid: str) -> None:
+        started.append(procs.spawn(com=False, titles=["PTV Vissim 2026 - my_model.inpx"]))
+
+    h = harness(procs=procs, on_dispatch=user_opens_vissim)
+    result = await h.service.connect()
+    user = started[0]
+    assert result["pid"] is None and result["job_object"] is False
+    assert result["warnings"] == [f"{NOT_ADOPTED_WARNING} (PID {user.pid})", PID_NOT_DETECTED_WARNING]
+    assert procs.job_create_calls == 0 and not procs.all_jobs_contain(user.pid)
+    assert h.service.health()["pid"] is None
+
+    await h.service.restart()
+    await h.service.close()
+    h.service.shutdown_fast()
+    assert all(proc.alive for proc in started) and len(started) == 2
+    assert procs.kill_calls == [] and procs.terminate_calls == []
+
+
+async def test_a_new_vissim_with_an_unreadable_command_line_is_adopted_with_a_warning(
+    harness: MakeHarness,
+) -> None:
+    """PLAN 6.4 (1 new -> that PID) when the command line cannot be read (access denied), with a warning."""
+    h = harness(spawn_options={"cmdline_readable": False})
+    result = await h.service.connect()
+    assert result["pid"] == h.process.pid and result["job_object"] is True
+    assert result["warnings"] == [ownership_unverified_warning(h.process.pid)]
+    pid = result["pid"]
+    h.service.shutdown_fast()
+    assert h.procs.killed == [pid]
+
+
 async def test_job_object_failure_is_only_a_warning(harness: MakeHarness) -> None:
     h = harness()
     h.procs.assign_error = PermissionError(5, "Access is denied")
@@ -210,11 +250,19 @@ async def test_failed_process_listing_disables_detection_and_kills(harness: Make
 
 
 async def test_job_object_is_assigned_early_during_a_slow_start(harness: MakeHarness) -> None:
-    h = harness(dispatch_delay_s=0.3)
-    result = await h.service.connect()
+    """While Dispatch is still blocked, the single new COM-launched Vissim is already in the kill-on-close job
+    (if the server died now, Windows would still end it); the final assignment reuses that attempt."""
+    h = harness(dispatch_delay_s=30)
+    connecting = asyncio.create_task(h.service.connect())
+    await eventually(lambda: any(job.assigned for job in h.procs.jobs))
+    assert h.service.connecting and not connecting.done()  # still inside Dispatch
     (job,) = h.procs.jobs
-    assert job.assigned == [(result["pid"], h.service.pid_create_time)]  # once: early, then reused
-    assert result["job_object"] is True
+    (proc,) = h.procs.table.values()
+    assert job.assigned == [(proc.pid, proc.create_time)]
+    h.backends.last.release_dispatch()
+    result = await connecting
+    assert result["pid"] == proc.pid and result["job_object"] is True
+    assert job.assigned == [(proc.pid, proc.create_time)]  # not repeated
 
 
 # --- start-up watchdog (EXTENSION): license dialog, timeout, failed Dispatch
@@ -308,6 +356,56 @@ async def test_health_and_calls_while_connecting(harness: MakeHarness) -> None:
     h.backends.last.release_dispatch()
     result = await connecting
     assert result["pid"] == h.service.pid is not None
+
+
+async def test_a_cancelled_connect_cleans_up_the_starting_vissim(harness: MakeHarness) -> None:
+    """The client cancels vissim_connect during a slow start: the clean-up runs in the cancelled task."""
+    h = harness(dispatch_delay_s=30)
+    connecting = asyncio.create_task(h.service.connect())
+    await eventually(lambda: len(h.procs.table) == 1 and h.service.connecting)
+    worker = h.service.worker
+    assert worker is not None
+    connecting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await connecting
+    (proc,) = h.procs.table.values()
+    assert proc.ended_by == "kill"  # the single new COM-launched process
+    assert worker.abandoned and h.service.worker is None
+    health = h.service.health()
+    assert health["connected"] is False and health["connecting"] is False and health["pid"] is None
+    h.backends.backend_options["dispatch_delay_s"] = 0.0
+    assert (await h.service.connect())["generation"] == 2
+
+
+async def test_connect_replaces_a_connection_whose_vissim_process_is_gone(harness: MakeHarness) -> None:
+    h = harness()
+    first = await h.service.connect()
+    process = h.process
+    process.on_end.clear()  # the COM proxy has not noticed yet ...
+    process.end("crash")  # ... that Vissim is gone
+    health = h.service.health()
+    assert health["connected"] is True and health["vissim_alive"] is False
+    gone = f"the Vissim process (PID {first['pid']}) is no longer running; call vissim_restart"
+    assert gone in health["warnings"]
+    result = await h.service.connect()  # not ALREADY_CONNECTED: the connection is verifiably lost
+    assert result["generation"] == 2 and result["pid"] != first["pid"]
+    assert result["warnings"] == [
+        f"the previous connection was dropped: the Vissim process (PID {first['pid']}) was no longer running"
+    ]
+    assert h.procs.killed == []
+    assert await h.service.call(count_links, task_name="count") == 10
+
+
+async def test_connect_after_a_lost_connection_kills_the_unresponsive_vissim(harness: MakeHarness) -> None:
+    h = harness()
+    first = await h.service.connect()
+    h.vissim.raise_com_error_next(RPC_E_DISCONNECTED)  # the COM connection breaks; the process lives on
+    await raises(ErrorCode.COM_ERROR, h.service.call(count_links, task_name="count"))
+    old = h.procs.table[first["pid"]]
+    assert h.service.connected is False and old.alive
+    result = await h.service.connect()
+    assert result["warnings"] == [f"the previous, unresponsive Vissim (PID {old.pid}) was killed"]
+    assert old.ended_by == "kill" and result["generation"] == 2
 
 
 # --- call(): watchdog, error mapping, disconnects, cancellation (PLAN 6.3)
@@ -436,6 +534,73 @@ async def test_a_vanished_vissim_process_counts_as_a_disconnect(harness: MakeHar
     assert h.service.connected is False
 
 
+async def test_a_call_failed_in_transit_by_a_dying_vissim_is_a_disconnect(harness: MakeHarness) -> None:
+    """Real COM often fails the call in flight with RPC_S_CALL_FAILED when the server process dies."""
+    h = harness(dead_call_hresult=RPC_S_CALL_FAILED)
+    await h.service.connect()
+    h.vissim.hang_next_call(30)
+    hung = asyncio.create_task(h.service.call(count_links, timeout_s=10, task_name="hung"))
+    await eventually(lambda: h.service.health()["current_task"] == "hung")
+    h.vissim.crash()  # Vissim dies while the call is in flight
+    error = await raises(ErrorCode.COM_ERROR, hung)
+    assert error.details is not None and error.details["hresult"] == RPC_S_CALL_FAILED
+    assert error.details["disconnected"] is True and error.hint == RESTART_HINT
+    assert h.service.connected is False
+
+
+async def test_a_call_failed_in_transit_waits_briefly_for_the_ending_process(harness: MakeHarness) -> None:
+    """The error can arrive while the process is still ending: it is watched for call_failed_grace_s."""
+    h = harness()
+    h.service.call_failed_grace_s = 5.0  # ends as soon as the process is gone
+    await h.service.connect()
+    process = h.process
+    process.on_end.clear()
+    h.vissim.raise_com_error_next(RPC_S_CALL_FAILED)
+    threading.Timer(0.05, process.end, args=("crash",)).start()  # still alive when the error arrives
+    error = await raises(ErrorCode.COM_ERROR, h.service.call(count_links, task_name="count"))
+    assert error.details is not None and error.details["disconnected"] is True
+    assert h.service.connected is False
+
+
+async def test_a_call_failed_in_transit_while_vissim_lives_keeps_the_connection(harness: MakeHarness) -> None:
+    h = harness()
+    await h.service.connect()
+    h.vissim.raise_com_error_next(RPC_S_CALL_FAILED)
+    error = await raises(ErrorCode.COM_ERROR, h.service.call(count_links, task_name="count"))
+    assert error.hint == HRESULT_HINTS[RPC_S_CALL_FAILED]
+    assert error.details is not None and "disconnected" not in error.details
+    assert h.service.connected is True
+    assert await h.service.call(count_links, task_name="count") == 10
+
+
+async def test_a_call_failed_in_transit_with_an_unknown_pid(harness: MakeHarness) -> None:
+    """Without a PID the HRESULT alone does not prove that Vissim is gone; the next call tells."""
+    h = harness({"VISSIM_PID_DETECT_S": "0.1"}, on_dispatch=lambda backend, progid: None)
+    await h.service.connect()
+    h.vissim.raise_com_error_next(RPC_S_CALL_FAILED)
+    error = await raises(ErrorCode.COM_ERROR, h.service.call(count_links, task_name="count"))
+    assert "vissim_health" in (error.hint or "") and h.service.connected is True
+    h.vissim.crash()
+    await raises(ErrorCode.COM_ERROR, h.service.call(count_links, task_name="count"))
+    assert h.service.connected is False
+
+
+async def test_a_call_after_the_com_object_was_released_is_not_connected(harness: MakeHarness) -> None:
+    """A task never meets a missing COM root as an AttributeError: NOT_CONNECTED, and the connection is
+    lost."""
+    h = harness()
+    await h.service.connect()
+
+    def release(ctx: WorkerContext) -> None:
+        ctx.vissim = None
+
+    await h.service.call(release, task_name="release")
+    error = await raises(ErrorCode.NOT_CONNECTED, h.service.call(count_links, task_name="count"))
+    assert error.message == "the Vissim COM object of this connection was already released"
+    assert h.service.connected is False
+    assert (await h.service.connect())["generation"] == 2  # recovers like any lost connection
+
+
 async def test_a_cancelled_call_that_is_still_queued_never_runs(harness: MakeHarness) -> None:
     h = harness()
     await h.service.connect()
@@ -484,8 +649,9 @@ async def test_restart_kills_vissim_bumps_the_generation_and_aborts_the_job(harn
     assert h.service.last_error is None
 
 
-async def test_restart_recovers_from_a_hung_vissim(harness: MakeHarness) -> None:
-    h = harness()
+@pytest.mark.parametrize("dead_call_hresult", [RPC_S_SERVER_UNAVAILABLE, RPC_S_CALL_FAILED])
+async def test_restart_recovers_from_a_hung_vissim(harness: MakeHarness, dead_call_hresult: int) -> None:
+    h = harness(dead_call_hresult=dead_call_hresult)
     await h.service.connect()
     h.vissim.hang_next_call(30)
     await raises(ErrorCode.TIMEOUT_HUNG, h.service.call(count_links, timeout_s=0.2, task_name="hung"))
@@ -500,7 +666,9 @@ async def test_restart_recovers_from_a_hung_vissim(harness: MakeHarness) -> None
     assert await h.service.call(count_links, task_name="count") == 10
 
 
-async def test_a_late_result_of_the_replaced_worker_is_discarded(harness: MakeHarness) -> None:
+async def test_a_hung_call_fails_when_restart_kills_its_vissim(harness: MakeHarness) -> None:
+    """restart kills Vissim, so the hung call of the replaced worker ends with a COM error: the caller gets
+    NOT_CONNECTED (its generation was replaced), not that COM error."""
     h = harness()
     await h.service.connect()
     h.vissim.hang_next_call(30)
@@ -512,6 +680,25 @@ async def test_a_late_result_of_the_replaced_worker_is_discarded(harness: MakeHa
         "Vissim was restarted or closed while 'hung' was running; its result was discarded"
     )
     assert result["generation"] == 2 and h.service.connected
+
+
+async def test_a_late_result_of_the_replaced_worker_is_discarded(harness: MakeHarness) -> None:
+    """PLAN 6.2: with an unknown PID restart cannot kill the old Vissim, so the hung call later *succeeds* on
+    the replaced worker - and that late result must still be discarded."""
+    h = harness({"VISSIM_PID_DETECT_S": "0.1"}, on_dispatch=lambda backend, progid: None)
+    await h.service.connect()
+    old_vissim = h.vissim
+    old_vissim.hang_next_call(30)
+    hung = asyncio.create_task(h.service.call(count_links, timeout_s=10, task_name="hung"))
+    await eventually(lambda: h.service.health()["current_task"] == "hung")
+    result = await h.service.restart()
+    assert result["generation"] == 2 and result["killed"] is False and not hung.done()
+    old_vissim.release_hang()  # the old call returns 10 now, on the abandoned worker
+    error = await raises(ErrorCode.NOT_CONNECTED, hung)
+    assert error.message == (
+        "Vissim was restarted or closed while 'hung' was running; its result was discarded"
+    )
+    assert await h.service.call(count_links, task_name="count") == 10  # the new connection works
 
 
 async def test_restart_without_a_connection_just_connects(harness: MakeHarness) -> None:
@@ -540,6 +727,85 @@ async def test_restart_during_shutdown(harness: MakeHarness) -> None:
     await h.service.connect()
     h.service.shutdown_fast()
     await raises(ErrorCode.SHUTTING_DOWN, h.service.restart())
+
+
+async def test_a_failed_restart_still_reports_the_previous_vissim(harness: MakeHarness) -> None:
+    """The previous Vissim could not be killed (PID unknown) and the new start shows the license dialog -
+    likely *because* the old instance holds the single license seat. The error must say so."""
+    procs = FakeProcs()
+    starts: list[int] = []
+
+    def on_dispatch(backend: Any, progid: str) -> Any:
+        starts.append(1)
+        if len(starts) == 1:
+            return None  # the first Vissim: its PID is not detected
+        backend.dispatch_delay_s = 30
+        return procs.spawn(titles=[LICENSE_DIALOG_TITLE])
+
+    h = harness({"VISSIM_PID_DETECT_S": "0.1"}, procs=procs, on_dispatch=on_dispatch)
+    await h.service.connect()
+    job = StubJob(generation=h.service.generation)
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: job.ticks >= 1)
+
+    error = await raises(ErrorCode.COM_ERROR, h.service.restart())
+    not_killed = (
+        "the PID of the previous Vissim was not detected, so it was not killed; close it manually if it is "
+        "still open"
+    )
+    assert "license dialog" in error.message
+    assert "the previous Vissim (PID unknown) was not killed and may still be running" in error.message
+    assert error.details is not None
+    assert error.details["killed"] is True  # the license-dialog process of the new start
+    assert error.details["previous_pid"] is None and error.details["previous_killed"] is False
+    assert error.details["aborted_job_id"] == "job-1" and job.state == "aborted"
+    assert error.details["previous_warnings"] == [not_killed]
+    health = h.service.health()
+    assert health["connected"] is False and health["warnings"] == [not_killed]
+    assert health["last_error"]["message"] == error.message
+
+
+async def test_restart_warns_when_the_previous_vissim_cannot_be_killed(harness: MakeHarness) -> None:
+    procs = FakeProcs()
+    started: list[Any] = []
+
+    def on_dispatch(backend: Any, progid: str) -> Any:
+        started.append(procs.spawn(refuses_end=not started))  # the first one runs as administrator
+        return started[-1]
+
+    h = harness(procs=procs, on_dispatch=on_dispatch)
+    first = await h.service.connect()
+    result = await h.service.restart()
+    warning = (
+        f"the previous Vissim (PID {first['pid']}) is still running and could not be killed (does it run as "
+        "administrator?); close it manually - with a single license seat a new instance may fail to start"
+    )
+    assert result["killed"] is False and result["previous_pid"] == first["pid"]
+    assert result["warnings"] == [warning] and h.service.health()["warnings"] == [warning]
+    assert started[0].alive and result["pid"] == started[1].pid
+
+
+async def test_restart_warns_when_the_previous_vissim_survives_the_kill(harness: MakeHarness) -> None:
+    procs = FakeProcs()
+    started: list[Any] = []
+
+    def on_dispatch(backend: Any, progid: str) -> Any:
+        started.append(procs.spawn(survives_kill=not started))
+        return started[-1]
+
+    h = harness(procs=procs, on_dispatch=on_dispatch)
+    first = await h.service.connect()
+    result = await h.service.restart()
+    assert result["killed"] is True
+    assert result["warnings"] == [
+        f"the previous Vissim (PID {first['pid']}) was still running after the kill"
+    ]
+
+    h.backends.backend_options["dispatch_error"] = CO_E_SERVER_EXEC_FAILURE
+    error = await raises(ErrorCode.COM_ERROR, h.service.restart())  # killed fine, but the new start fails
+    assert error.details is not None and error.details["previous_pid"] == started[1].pid
+    assert error.details["previous_killed"] is True and "previous_warnings" not in error.details
+    assert "may still be running" not in error.message
 
 
 # --- close (PLAN 6.4, 7.1)
@@ -658,6 +924,184 @@ async def test_close_cancels_a_connect_in_progress(harness: MakeHarness) -> None
     error = await raises(ErrorCode.NOT_CONNECTED, connecting)
     assert error.message == "vissim_connect was cancelled by vissim_close"
     assert proc.ended_by == "kill" and h.service.worker is None
+
+
+@pytest.mark.parametrize("hresult", [RPC_S_CALL_FAILED, RPC_E_DISCONNECTED, RPC_S_SERVER_UNAVAILABLE])
+async def test_close_waits_for_an_exiting_vissim_whose_exit_reply_is_lost(
+    harness: MakeHarness, hresult: int
+) -> None:
+    """Exit() starts the shutdown and its reply is lost (the server goes away first); the process ends 0.2 s
+    later. PLAN 6.4: wait for it - never terminate a Vissim that is exiting normally."""
+    h = harness(exit_error=hresult, exit_process_delay_s=0.2)
+    h.service.close_exit_wait_s = 5.0  # ends as soon as the process is gone
+    pid = (await h.service.connect())["pid"]
+    result = await h.service.close()
+    assert result == {"closed": True, "method": "exit", "pid": pid, "warnings": []}
+    assert h.procs.table[pid].ended_by == "exit"
+    assert h.procs.terminate_calls == [] and h.procs.kill_calls == []
+
+
+async def test_close_returns_once_vissim_ends_while_exit_is_pending(harness: MakeHarness) -> None:
+    """The process ends but the Exit() call never returns: the server watches the process, not the reply."""
+    h = harness()
+    pid = (await h.service.connect())["pid"]
+    h.service.close_exit_call_timeout_s = 5.0
+    h.vissim.hang_on("Exit", 30)
+    process = h.process
+    process.on_end.clear()  # the hung call does not notice the end of the process
+    threading.Timer(0.2, process.end, args=("exit",)).start()
+    started = time.monotonic()
+    result = await h.service.close()
+    assert time.monotonic() - started < 2.0
+    assert result == {"closed": True, "method": "exit", "pid": pid, "warnings": []}
+    assert h.procs.terminate_calls == []
+
+
+async def test_close_still_waits_after_exit_failed_with_another_com_error(harness: MakeHarness) -> None:
+    h = harness(exit_error=E_FAIL, exit_keeps_process=True)
+    pid = (await h.service.connect())["pid"]
+    started = time.monotonic()
+    result = await h.service.close()
+    assert time.monotonic() - started >= h.service.close_exit_wait_s  # Exit() was delivered: wait first
+    assert result == {
+        "closed": True,
+        "method": "terminate",
+        "pid": pid,
+        "warnings": ["Exit() failed (Unspecified error)"],
+    }
+
+
+async def test_close_after_exit_failed_but_vissim_exited_anyway(harness: MakeHarness) -> None:
+    h = harness(exit_error=E_FAIL, exit_process_delay_s=0.2)
+    h.service.close_exit_wait_s = 5.0
+    pid = (await h.service.connect())["pid"]
+    result = await h.service.close()
+    assert result == {
+        "closed": True,
+        "method": "exit",
+        "pid": pid,
+        "warnings": ["Exit() failed (Unspecified error)"],
+    }
+    assert h.procs.terminate_calls == []
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected"),
+    [
+        (
+            "hang",
+            {
+                "closed": False,
+                "method": None,
+                "warnings": [
+                    "Exit() did not return within 0.2 s (Vissim may show a dialog)",
+                    "the Vissim PID is unknown, so the server cannot verify that the process ended; close "
+                    "Vissim manually",
+                ],
+            },
+        ),
+        (
+            "reply_lost",
+            {
+                "closed": True,
+                "method": "exit",
+                "warnings": ["the Vissim PID is unknown, so the server cannot verify that the process ended"],
+            },
+        ),
+        (
+            "com_error",
+            {
+                "closed": False,
+                "method": None,
+                "warnings": [
+                    "Exit() failed (Unspecified error)",
+                    "the Vissim PID is unknown, so the server cannot verify that the process ended; close "
+                    "Vissim manually",
+                ],
+            },
+        ),
+    ],
+)
+async def test_close_with_an_unknown_pid_reports_without_claiming_to_end_it(
+    harness: MakeHarness, fault: str, expected: dict[str, Any]
+) -> None:
+    options: dict[str, Any] = {
+        "reply_lost": {"exit_error": RPC_S_CALL_FAILED},
+        "com_error": {"exit_error": E_FAIL},
+    }.get(fault, {})
+    h = harness({"VISSIM_PID_DETECT_S": "0.1"}, on_dispatch=lambda backend, progid: None, **options)
+    await h.service.connect()
+    h.service.close_exit_call_timeout_s = 0.2
+    if fault == "hang":
+        h.vissim.hang_on("Exit", 30)
+    result = await h.service.close()
+    assert result == {**expected, "pid": None}
+    assert h.procs.kill_calls == [] and h.procs.terminate_calls == []
+
+
+async def test_a_cancelled_close_leaves_a_lost_connection_that_recovers(harness: MakeHarness) -> None:
+    """The client cancels vissim_close while Exit() waits behind a 'Save changes?' dialog: no half-closed
+    state (connected with a dead COM root), and the next connect works once Vissim has left."""
+    h = harness()
+    pid = (await h.service.connect())["pid"]
+    job = StubJob(generation=h.service.generation)
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: job.ticks >= 1)
+    old_vissim = h.vissim
+    old_vissim.hang_on("Exit", 30)
+    closing = asyncio.create_task(h.service.close())
+    await eventually(lambda: h.service.health()["current_task"] == "Exit")
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+    health = h.service.health()
+    assert health["connected"] is False and health["pid"] == pid and health["vissim_alive"] is True
+    assert any(w.startswith("vissim_close was cancelled before it finished") for w in health["warnings"])
+    assert job.state == "aborted"
+    error = await raises(ErrorCode.NOT_CONNECTED, h.service.call(count_links, task_name="count"))
+    assert error.hint == RESTART_HINT
+
+    old_vissim.release_hang()  # the dialog is answered: Exit() completes, Vissim leaves by itself
+    await eventually(lambda: not h.procs.table[pid].alive)
+    result = await h.service.connect()
+    assert result["generation"] == 2 and result["pid"] != pid
+    assert h.procs.table[pid].ended_by == "exit" and h.procs.killed == []
+    assert await h.service.call(count_links, task_name="count") == 10
+
+
+async def test_close_again_after_a_cancelled_close_ends_the_process(harness: MakeHarness) -> None:
+    h = harness()
+    pid = (await h.service.connect())["pid"]
+    h.vissim.hang_on("Exit", 30)
+    closing = asyncio.create_task(h.service.close())
+    await eventually(lambda: h.service.health()["current_task"] == "Exit")
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    result = await h.service.close()  # the old worker is still stuck in Exit(): no second Exit()
+    assert result == {"closed": True, "method": "terminate", "pid": pid, "warnings": []}
+    health = h.service.health()
+    assert health["pid"] is None and health["warnings"] == [] and h.service.worker is None
+
+
+async def test_a_close_cancelled_while_waiting_for_the_process(harness: MakeHarness) -> None:
+    h = harness(exit_keeps_process=True)
+    h.service.close_exit_wait_s = 30.0
+    pid = (await h.service.connect())["pid"]
+    vissim = h.vissim
+    closing = asyncio.create_task(h.service.close())
+    await eventually(lambda: vissim.exited)  # Exit() returned; close now waits for the process
+    await asyncio.sleep(0.05)
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert h.service.connected is False and h.service.pid == pid and h.procs.table[pid].alive
+    assert h.service.worker is None
+    assert any(w.startswith("vissim_close was cancelled") for w in h.service.health()["warnings"])
+    result = await h.service.restart()  # the kept PID lets restart end the old Vissim
+    assert result["previous_pid"] == pid and result["killed"] is True
+    assert h.procs.table[pid].ended_by == "kill" and result["generation"] == 2
 
 
 # --- shutdown_fast (PLAN 6.4)
@@ -801,19 +1245,125 @@ async def test_timeout_during_a_chunk_names_the_chunk(harness: MakeHarness) -> N
         chunk_done.set()
 
 
-async def test_background_errors_are_reported_and_the_worker_survives(harness: MakeHarness) -> None:
+def error_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+async def test_a_raising_tick_fails_its_job_once_and_is_not_retried(
+    harness: MakeHarness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The safety net for a tick that raises instead of recording its error (M4): the job goes to ``error``,
+    one ERROR with traceback is logged, and the worker does not re-tick it every poll."""
+    caplog.set_level(logging.INFO, logger="vissim_mcp")
     h = harness()
     await h.service.connect()
-    job = StubJob(generation=h.service.generation, fail=RuntimeError("chunk exploded"))
+    job = StubJob(generation=h.service.generation, raises=RuntimeError("chunk exploded"))
     h.service.jobs = StubRegistry(job)
-    await eventually(lambda: h.service.last_error is not None)
+    await eventually(lambda: job.state == "error")
+    await asyncio.sleep(0.3)  # ~6 worker polls
+    assert job.tick_calls == 1
+    (failure,) = job.failures
+    assert failure["code"] == "INTERNAL"
+    assert failure["message"] == (
+        "simulation job job-1: the simulation step failed: RuntimeError: chunk exploded"
+    )
+    (record,) = error_records(caplog)
+    assert record.exc_info is not None and "chunk exploded" in record.getMessage()
     last_error = h.service.last_error
-    assert last_error is not None
-    assert last_error["code"] == "INTERNAL" and "chunk exploded" in last_error["message"]
-    assert last_error["task"] == "background step"
-    assert await h.service.call(count_links, task_name="count") == 10
+    assert last_error is not None and last_error["code"] == "INTERNAL"
+    assert last_error["message"] == failure["message"] and last_error["task"] == "background step"
+    assert await h.service.call(count_links, task_name="count") == 10  # the worker survives
     assert h.service.connected
 
-    job.fail = make_com_error(RPC_E_DISCONNECTED)  # Vissim went away during a chunk
+    fresh = StubJob("job-2", generation=h.service.generation)  # a new job of the same connection runs
+    h.service.jobs = StubRegistry(fresh)
+    await eventually(lambda: fresh.ticks >= 2)
+
+
+async def test_a_tick_that_meets_a_disconnect_fails_the_job_and_the_connection(harness: MakeHarness) -> None:
+    h = harness()
+    await h.service.connect()
+    job = StubJob(generation=h.service.generation, raises=make_com_error(RPC_E_DISCONNECTED))
+    h.service.jobs = StubRegistry(job)
     await eventually(lambda: not h.service.connected)
+    (failure,) = job.failures
+    assert job.state == "error" and failure["code"] == "COM_ERROR" and failure["hint"] == RESTART_HINT
+    assert failure["details"]["disconnected"] is True
     assert h.service.last_error is not None and h.service.last_error["code"] == "COM_ERROR"
+    await asyncio.sleep(0.2)
+    assert job.tick_calls == 1
+
+
+async def test_a_job_that_stays_running_after_a_failed_tick_is_not_ticked_again(harness: MakeHarness) -> None:
+    """Even if the job's own fail() leaves it 'running' (a bug in the job), its tick is not retried."""
+
+    class StubbornJob(StubJob):
+        def fail(self, error: dict[str, Any]) -> None:
+            self.failures.append(error)  # the state is not changed
+
+    h = harness()
+    await h.service.connect()
+    job = StubbornJob(generation=h.service.generation, raises=RuntimeError("tick bug"))
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: job.failures)
+    await asyncio.sleep(0.3)  # ~6 worker polls
+    assert job.state == "running" and job.tick_calls == 1 and len(job.failures) == 1
+
+
+async def test_a_job_without_the_fail_hook_is_aborted_by_the_safety_net(harness: MakeHarness) -> None:
+    class AbortOnlyJob(StubJob):
+        fail = None  # type: ignore[assignment]  # fail() is optional in the hook protocol
+
+    h = harness()
+    await h.service.connect()
+    job = AbortOnlyJob(generation=h.service.generation, raises=ValueError("bad chunk"))
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: job.state == "aborted")
+    assert job.abort_reasons == ["simulation job job-1: the simulation step failed: ValueError: bad chunk"]
+    await asyncio.sleep(0.2)
+    assert job.tick_calls == 1
+
+
+async def test_a_late_tick_failure_of_a_replaced_generation_is_only_logged(
+    harness: MakeHarness, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="vissim_mcp")
+    h = harness()
+    await h.service.connect()
+    chunk_done = threading.Event()
+    job = StubJob(generation=h.service.generation, block=chunk_done, raises=RuntimeError("late failure"))
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: h.service.health()["current_task"] == CHUNK_TASK)
+    old_worker = h.service.worker
+    assert old_worker is not None
+    await h.service.restart()  # aborts the job while its chunk is still running
+    chunk_done.set()  # the old chunk ends with an exception now
+    assert old_worker.join(5)
+    assert job.state == "aborted" and job.failures == []
+    assert h.service.last_error is None and h.service.connected
+    assert any("background step of replaced generation 1 failed" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_failing_background_step_is_logged_with_traceback_once(
+    harness: MakeHarness, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A bug outside tick (here: the registry itself raises) must not flood the logs at the poll rate."""
+
+    class BrokenRegistry:
+        @property
+        def current(self) -> Any:
+            raise RuntimeError("registry bug")
+
+    caplog.set_level(logging.INFO, logger="vissim_mcp")
+    h = harness()
+    await h.service.connect()
+    h.service.jobs = BrokenRegistry()
+    await eventually(lambda: h.service.last_error is not None)
+    await asyncio.sleep(0.3)  # many more worker polls
+    h.service.jobs = None
+    (record,) = error_records(caplog)
+    assert "registry bug" in record.getMessage() and record.exc_info is not None
+    last_error = h.service.last_error
+    assert last_error is not None and last_error["code"] == "INTERNAL"
+    assert "registry bug" in last_error["message"]
+    assert await h.service.call(count_links, task_name="count") == 10

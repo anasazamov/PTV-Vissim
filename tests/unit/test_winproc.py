@@ -25,7 +25,12 @@ import psutil
 import pytest
 
 from vissim_mcp import winproc
-from vissim_mcp.winproc import PID_NOT_DETECTED_WARNING, ProcInfo
+from vissim_mcp.winproc import (
+    NOT_ADOPTED_WARNING,
+    PID_NOT_DETECTED_WARNING,
+    ProcInfo,
+    ownership_unverified_warning,
+)
 
 PATTERN = re.compile(r"^vissim\d*\.exe$", re.IGNORECASE)
 VISSIM_EXE = r"C:\Program Files\PTV Vision\PTV Vissim 2026\Exe\Vissim260.exe"
@@ -185,6 +190,51 @@ def test_choose_new_pid_rules() -> None:
     assert pid == 20 and warnings[0].endswith("using the COM-launched one, PID 20")
 
 
+def test_a_new_process_whose_readable_command_line_has_no_com_switch_is_never_adopted() -> None:
+    """-Embedding proves ownership (M0): a new Vissim without it was opened by a user meanwhile."""
+    user = ProcInfo(30, "Vissim260.exe", 1.0, (VISSIM_EXE,))
+    other_user = ProcInfo(31, "Vissim260.exe", 2.0, (VISSIM_EXE, "model.inpx"))
+    assert winproc.choose_new_pid({30: user}) == (
+        None,
+        None,
+        [f"{NOT_ADOPTED_WARNING} (PID 30)", PID_NOT_DETECTED_WARNING],
+    )
+    assert NOT_ADOPTED_WARNING == (
+        "a new Vissim process without -Embedding appeared during connect; it was not adopted"
+    )
+    assert winproc.choose_new_pid({30: user, 31: other_user}) == (
+        None,
+        None,
+        [
+            "several new Vissim processes without -Embedding appeared during connect (PIDs 30, 31); none was "
+            "adopted",
+            PID_NOT_DETECTED_WARNING,
+        ],
+    )
+
+
+def test_a_new_process_with_an_unreadable_command_line_is_adopted_with_a_warning() -> None:
+    """Access denied on the command line: PLAN 6.4 (1 new -> that PID), but the ownership is unverified."""
+    unreadable = ProcInfo(40, "Vissim260.exe", 5.0, None)
+    user = ProcInfo(41, "Vissim260.exe", 6.0, (VISSIM_EXE,))
+    com = ProcInfo(42, "Vissim260.exe", 1.0, (VISSIM_EXE, "-Embedding"))
+    assert winproc.choose_new_pid({40: unreadable}) == (40, 5.0, [ownership_unverified_warning(40)])
+    assert "ownership could not be verified" in ownership_unverified_warning(40)
+    assert winproc.choose_new_pid({40: unreadable, 41: user}) == (
+        40,
+        5.0,
+        [
+            "several new Vissim processes appeared (PIDs 40, 41); assuming the newest one whose command line "
+            "could not be read, PID 40",
+            ownership_unverified_warning(40),
+        ],
+    )
+    pid, _created, warnings = winproc.choose_new_pid({40: unreadable, 41: user, 42: com})
+    assert pid == 42 and warnings == [
+        "several new Vissim processes appeared (PIDs 40, 41, 42); using the COM-launched one, PID 42"
+    ]
+
+
 # --- listing and detection (psutil mocked)
 
 
@@ -338,8 +388,68 @@ def test_job_limit_structure_layout() -> None:
     pointer_bits = struct.calcsize("P") * 8
     assert ctypes.sizeof(winproc.JOBOBJECT_BASIC_LIMIT_INFORMATION) == (64 if pointer_bits == 64 else 48)
     assert ctypes.sizeof(winproc.JOBOBJECT_EXTENDED_LIMIT_INFORMATION) == (144 if pointer_bits == 64 else 112)
-    assert winproc.JOB_LIMIT_FLAGS & winproc.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0x2000
+    assert winproc.JOB_LIMIT_FLAGS == winproc.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0x2000  # PLAN 6.4
+    assert not hasattr(winproc, "JOB_OBJECT_LIMIT_BREAKAWAY_OK")
     assert winproc.JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS == 9
+
+
+def test_the_job_is_created_with_exactly_kill_on_job_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What really reaches SetInformationJobObject: LimitFlags 0x2000 and nothing else (no BREAKAWAY_OK)."""
+    seen: dict[str, Any] = {}
+
+    class FakeKernel32:
+        def CreateJobObjectW(self, attributes: Any, name: Any) -> int:
+            return 0x1234
+
+        def SetInformationJobObject(self, handle: int, info_class: int, info: Any, size: int) -> int:
+            limits = info._obj  # the structure behind ctypes.byref()
+            seen.update(
+                handle=handle,
+                info_class=info_class,
+                size=size,
+                flags=limits.BasicLimitInformation.LimitFlags,
+                memory=(limits.ProcessMemoryLimit, limits.JobMemoryLimit),
+            )
+            return 1
+
+        def CloseHandle(self, handle: int) -> int:
+            seen["closed"] = handle
+            return 1
+
+    monkeypatch.setattr(winproc, "_kernel32", FakeKernel32)
+    assert winproc._k32_create_kill_on_close_job() == 0x1234
+    assert seen == {
+        "handle": 0x1234,
+        "info_class": 9,
+        "size": ctypes.sizeof(winproc.JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+        "flags": 0x2000,
+        "memory": (0, 0),
+    }
+
+
+@windows_only
+def test_a_real_job_object_has_exactly_kill_on_job_close() -> None:
+    """Read the limits back from Windows (a fresh job with no process in it; its handle is closed here)."""
+    from ctypes import wintypes
+
+    job = winproc.JobObject.create()
+    assert job is not None
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # private instance: global prototypes stay
+        query = kernel32.QueryInformationJobObject
+        query.argtypes = (
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        )
+        query.restype = wintypes.BOOL
+        info = winproc.JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        assert query(job.handle, 9, ctypes.byref(info), ctypes.sizeof(info), None), ctypes.get_last_error()
+        assert info.BasicLimitInformation.LimitFlags == 0x2000
+    finally:
+        winproc._k32_close_handle(job.handle)
 
 
 def test_job_object_assign_checks_identity_and_test_mode(monkeypatch: pytest.MonkeyPatch) -> None:

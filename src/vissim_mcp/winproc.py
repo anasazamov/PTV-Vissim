@@ -7,7 +7,9 @@ Safety rules (PLAN 6.4, contract section 6.5):
 
 * A process is "ours" only when it appeared after ``Dispatch`` started (PID diff against a snapshot taken
   before), its name fully matches ``VISSIM_EXE_PATTERN`` (case-insensitive) and its create time equals the
-  recorded one (protection against PID reuse). :func:`kill` / :func:`terminate` re-check all of this right
+  recorded one (protection against PID reuse). A new process whose readable command line has no COM switch
+  was started by someone else and is never adopted; one whose command line cannot be read is adopted with a
+  warning (:func:`choose_new_pid`). :func:`kill` / :func:`terminate` re-check name and create time right
   before acting; without a known PID and create time nothing is ever killed.
 * Connect clean-up (license dialog, timeout, failed ``Dispatch``) additionally requires a COM launch command
   line (``-Embedding`` / ``/Automation``), see :func:`cmdline_is_com_launched`.
@@ -42,6 +44,9 @@ from .config import ENV_FORBID_REAL, forbid_real_enabled
 log = logging.getLogger(__name__)
 
 PID_NOT_DETECTED_WARNING = "PID not detected; forced kill and job object disabled"
+#: A new Vissim whose readable command line has no COM switch was started by someone else (M0: a COM-launched
+# Vissim always has ``-Embedding``), so it is never adopted - and therefore never killed or put into the job.
+NOT_ADOPTED_WARNING = "a new Vissim process without -Embedding appeared during connect; it was not adopted"
 #: Two create times closer than this belong to the same process (psutil and GetProcessTimes both use
 # FILETIME).
 CREATE_TIME_TOLERANCE_S = 0.05
@@ -57,11 +62,11 @@ PROCESS_TERMINATE = 0x0001
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9  # JobObjectExtendedLimitInformation
-JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-#: KILL_ON_JOB_CLOSE (PLAN 6.4) plus BREAKAWAY_OK, so that a child Vissim starts with
-# CREATE_BREAKAWAY_FROM_JOB : is not refused (children started normally stay in the job and die with it).
-JOB_LIMIT_FLAGS = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+#: Exactly KILL_ON_JOB_CLOSE (PLAN 6.4): every process Vissim starts stays in the job and ends with it; a
+# child started with CREATE_BREAKAWAY_FROM_JOB is refused by Windows (M6 checks that real Vissim never needs
+# that, docs/com-names.md).
+JOB_LIMIT_FLAGS = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 _EPOCH_AS_FILETIME = 116_444_736_000_000_000  # 1970-01-01 in 100 ns units since 1601-01-01
 _TITLE_BUFFER_CHARS = 512
 
@@ -145,25 +150,53 @@ def new_processes(
     return found
 
 
+def ownership_unverified_warning(pid: int) -> str:
+    return (
+        f"the command line of the new Vissim process (PID {pid}) could not be read, so its ownership could "
+        "not be verified; it is treated as the Vissim this server started"
+    )
+
+
 def choose_new_pid(new: Mapping[int, ProcInfo]) -> tuple[int | None, float | None, list[str]]:
-    """PLAN 6.4 rules: one new process -> it; several -> the newest (preferring COM-launched ones) with a
-    warning; none -> ``(None, None, [PID_NOT_DETECTED_WARNING])``."""
+    """Which new process is ours (PLAN 6.4, with ``-Embedding`` as the proof of ownership).
+
+    * none -> ``(None, None, [PID_NOT_DETECTED_WARNING])``;
+    * one with a readable COM launch command line -> it; one whose command line could not be read (access
+      denied) -> it, per PLAN 6.4, with a warning that its ownership is unverified; one whose readable command
+      line has no COM switch -> not adopted (someone else started it): ``pid=None`` + warnings;
+    * several -> the newest COM-launched one (else the newest unreadable one) with a warning; never one whose
+      readable command line has no COM switch.
+    """
     if not new:
         return None, None, [PID_NOT_DETECTED_WARNING]
-    if len(new) == 1:
-        (info,) = new.values()
-        return info.pid, info.create_time, []
     com = [info for info in new.values() if info.com_launched]
-    pool = com or list(new.values())
+    unreadable = [info for info in new.values() if info.cmdline is None]
+    pool = com or unreadable
+    pids = ", ".join(str(pid) for pid in sorted(new))
+    if not pool:
+        if len(new) == 1:
+            first = f"{NOT_ADOPTED_WARNING} (PID {pids})"
+        else:
+            first = (
+                f"several new Vissim processes without -Embedding appeared during connect (PIDs {pids}); "
+                "none was adopted"
+            )
+        return None, None, [first, PID_NOT_DETECTED_WARNING]
     chosen = max(
         pool, key=lambda info: (info.create_time if info.create_time is not None else float("-inf"), info.pid)
     )
-    pids = ", ".join(str(pid) for pid in sorted(new))
-    if len(com) == 1:
-        reason = f"using the COM-launched one, PID {chosen.pid}"
-    else:
-        reason = f"assuming the newest one, PID {chosen.pid}"
-    return chosen.pid, chosen.create_time, [f"several new Vissim processes appeared (PIDs {pids}); {reason}"]
+    warnings: list[str] = []
+    if len(new) > 1:
+        if len(com) == 1:
+            reason = f"using the COM-launched one, PID {chosen.pid}"
+        elif com:
+            reason = f"assuming the newest one, PID {chosen.pid}"
+        else:
+            reason = f"assuming the newest one whose command line could not be read, PID {chosen.pid}"
+        warnings.append(f"several new Vissim processes appeared (PIDs {pids}); {reason}")
+    if not chosen.com_launched:
+        warnings.append(ownership_unverified_warning(chosen.pid))
+    return chosen.pid, chosen.create_time, warnings
 
 
 # --- OS seams (monkeypatched by tests)

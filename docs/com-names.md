@@ -69,6 +69,13 @@ PLAN.md 0-bo'lim, 5-tamoyil: **haqiqiy Vissim'da tasdiqlanmagan nom kodga qattiq
 | `VISSIM_SEED_ATTR` | `RandSeed` | AX, EX | configurable (documented) |
 | `VISSIM_BREAK_DISABLE_VALUE` | `0` | EX: "`SimBreakAt` = 0 means no break!", VBS: "If set to 0 then the simulation is not paused"; AX: min 0, standart 0 | configurable (documented) |
 
+## M6 da tekshiriladigan jarayon xatti-harakatlari
+
+| Nima | Hozirgi holat (M2) | M6 da tekshirish |
+|---|---|---|
+| Job Object `LimitFlags` | Faqat `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (0x2000), PLAN 6.4 bo'yicha; `BREAKAWAY_OK` yo'q | Haqiqiy Vissim (litsenziya yordamchisi, crash reporter, yordam oynasi va h.k.) `CREATE_BREAKAWAY_FROM_JOB` bilan jarayon ochadimi? Ochsa, Windows uni rad etadi (`ERROR_ACCESS_DENIED`). Shunday bo'lsa — flag'ni o'zgartirish faqat loyiha egasining roziligi bilan |
+| `Exit()` javobi | Javob qaytsa ham, `RPC_S_CALL_FAILED` / `RPC_E_DISCONNECTED` bilan tugasa ham jarayon 10 s kutiladi | Haqiqiy Vissim `Exit()` da qanday javob beradi va jarayon qancha vaqtda tugaydi |
+
 ## Yo'l (fayl) atributlari — `ATTRIBUTE_DENIED` siyosati
 
 PLAN.md 6.7: nomida (registrga befarq) `File`, `Path`, `Folder`, `Dir` bo'lgan atributni yozish
