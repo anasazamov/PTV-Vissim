@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vissim-mcp"
+dynamic = ["version"]
+description = "Stdio MCP server that lets Claude Code control PTV Vissim through COM on Windows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.10,<2",
+    "pywin32>=306; sys_platform == 'win32'",
+    "psutil>=5.9",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows",
+    "Private :: Do Not Upload",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff",
+    "mypy",
+]
+
+[project.scripts]
+vissim-mcp = "vissim_mcp.__main__:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "vissim_mcp.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "vissim: needs a real PTV Vissim with the COM module (manual, Windows only)",
+]
+addopts = ["-m", "not vissim"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# The stdout guard must run before any other import (PLAN 6.1).
+"src/vissim_mcp/__main__.py" = ["E402"]
+# The protocol-test launcher installs the guard, then makes deliberate noise.
+"tests/protocol/noisy_launcher.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
