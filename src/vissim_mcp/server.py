@@ -31,7 +31,7 @@ from . import __version__
 from .config import Settings
 from .logging_setup import flush_logging
 from .service import VissimService
-from .tools import files, lifecycle, objects, results, simulation
+from .tools import diagnostics, files, lifecycle, objects, results, signals, simulation
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ INSTRUCTIONS = (
     "vissim_wait_simulation. Call vissim_close at the end of the work to free the license seat."
 )
 #: Tool modules in registration order (= the order of tools/list).
-TOOL_MODULES = (lifecycle, files, objects, simulation, results)
+TOOL_MODULES = (lifecycle, files, objects, simulation, results, signals, diagnostics)
 #: Hard upper bound for the exit sequence (Claude Code kills the process tree 300 ms after closing stdin).
 EXIT_WATCHDOG_S = 0.25
 

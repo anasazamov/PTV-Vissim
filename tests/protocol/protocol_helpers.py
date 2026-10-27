@@ -33,8 +33,19 @@ SIMULATION_TOOLS = [
     "vissim_stop_simulation",
 ]
 RESULT_TOOLS = ["vissim_export_csv"]
-#: Every registered tool in tools/list order (M4: life cycle, files, objects, simulation, results).
-ALL_TOOLS = [*LIFECYCLE_TOOLS, *FILE_TOOLS, *OBJECT_TOOLS, *SIMULATION_TOOLS, *RESULT_TOOLS]
+SIGNAL_TOOLS = ["vissim_set_signal_state"]
+DIAGNOSTIC_TOOLS = ["vissim_tail_log", "vissim_exec_python"]
+#: Every registered tool in tools/list order: the 22 tools of PLAN 7 (life cycle, files, objects, simulation,
+#: results, signals, diagnostics).
+ALL_TOOLS = [
+    *LIFECYCLE_TOOLS,
+    *FILE_TOOLS,
+    *OBJECT_TOOLS,
+    *SIMULATION_TOOLS,
+    *RESULT_TOOLS,
+    *SIGNAL_TOOLS,
+    *DIAGNOSTIC_TOOLS,
+]
 
 
 def handshake(server: StdioServer) -> dict[str, dict[str, Any]]:

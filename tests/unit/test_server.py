@@ -40,8 +40,11 @@ async def test_build_server_registers_all_tool_modules(service: VissimService, s
         "vissim_resume_simulation",
         "vissim_stop_simulation",
         "vissim_export_csv",
+        "vissim_set_signal_state",
+        "vissim_tail_log",
+        "vissim_exec_python",
     ]
-    assert len(tools) == 19  # PLAN 7: 22 tools in v1.0, minus signals and diagnostics (M5)
+    assert len(tools) == 22  # PLAN 7: the complete v1.0 catalogue
     for tool in tools:
         assert tool.description and len(tool.description) < 4096, tool.name
         assert f"Example: {tool.name}(" in tool.description, tool.name
