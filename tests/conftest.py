@@ -54,6 +54,45 @@ _CLEARED_PREFIXES = ("VISSIM_", "FAKE_VISSIM_")
 _CLEARED_NAMES = ("CLAUDE_PROJECT_DIR",)
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Options of the real-Vissim suite (tests/real, PLAN 10.3). They live here because pytest reads options
+    only from the conftest files it loads at start-up; tests/real/conftest.py uses them."""
+    group = parser.getgroup("vissim", "real PTV Vissim tests (tests/real, run with -m vissim)")
+    group.addoption(
+        "--vissim-com-license",
+        action="store_true",
+        default=False,
+        help="confirm that a Vissim license WITH the COM module is active; without it every real test is "
+        "skipped before anything starts",
+    )
+    group.addoption(
+        "--vissim-manual",
+        action="store_true",
+        default=False,
+        help="also run the manual steps (modal dialog, Task Manager kill); needs -s",
+    )
+    group.addoption("--vissim-progid", default="Vissim.Vissim", help="COM ProgID for the real tests")
+    group.addoption(
+        "--vissim-model",
+        default=(
+            r"C:\Users\Public\Documents\PTV Vision\PTV Vissim 2026\Examples Training\COM\Basic Commands"
+            r"\COM Basic Commands.inpx"
+        ),
+        help="network that the real tests copy and load (default: the COM Basic Commands example)",
+    )
+    group.addoption(
+        "--vissim-results",
+        default=None,
+        help="append the observations of the real tests to this JSON-lines file (for docs/test-report-v1.md)",
+    )
+    group.addoption(
+        "--vissim-stress-timeout",
+        type=float,
+        default=3600.0,
+        help="wall-clock limit in seconds for the 5 x 3600 s stress run (default 3600)",
+    )
+
+
 @pytest.fixture(autouse=True)
 def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
     """Clean VISSIM_* environment with log/audit/allowed directories inside ``tmp_path``."""

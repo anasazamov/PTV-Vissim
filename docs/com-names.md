@@ -22,6 +22,14 @@ PLAN.md 0-bo'lim, 5-tamoyil: **haqiqiy Vissim'da tasdiqlanmagan nom kodga qattiq
 > 2026-10-16 holatiga ko'ra hech bir nom `verified` emas: kompyuterdagi yagona litsenziya — Demo (COM moduli yo'q),
 > shuning uchun COM orqali Vissim ishga tushmaydi (docs/preflight-report.md). M6 litsenziya hal bo'lgach bajariladi.
 
+Holat ustunini `scripts/probe_com_names.py --i-have-a-com-license --update` yangilaydi (ishlatish tartibi:
+docs/m6-runbook.md). Skript har bir qatorni birinchi katakdagi nom bo'yicha topadi — qator nomini o'zgartirsangiz,
+skriptdagi `PROBES` ro'yxatini ham o'zgartiring (`tests/unit/test_probe_com_names.py` buni tekshiradi).
+
+<!-- probe:auto:start -->
+> `scripts/probe_com_names.py` hali haqiqiy Vissim'da ishga tushirilmagan (COM litsenziyasi yo'q, Demo).
+<!-- probe:auto:end -->
+
 ## Metodlar va xossalar (COM interfeys a'zolari)
 
 | Nom | Qayerda ishlatiladi | Manba | Holat |
