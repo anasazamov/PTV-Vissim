@@ -21,8 +21,14 @@ What it does:
    raw results as JSON into the working directory. With ``--update`` it also rewrites the status column of
    docs/com-names.md and appends the raw results to docs/test-report-v1.md.
 
-Exit codes: 0 = every probed name works, 1 = some names failed (see the table), 2 = refused (missing flag,
-test mode, bad arguments), 3 = the probe could not run (Vissim did not start, the model could not be loaded).
+Outcomes: ``ok`` (-> ``verified``), ``failed`` (-> ``rejected``; only with evidence against the name: a
+COM_ERROR or RESOLVE_FAILED on it, or a semantic mismatch), ``inconclusive`` (the probe could not tell: a
+timeout, a lost connection, an unexpected Python error while handling a return value, a failed experiment
+without a COM error; ``--update`` leaves such rows unchanged) and ``skipped``.
+
+Exit codes: 0 = every probed name works, 1 = some names failed or were inconclusive (see the table),
+2 = refused (missing flag, test mode, bad arguments), 3 = the probe could not run (Vissim did not start, the
+model could not be loaded) or stopped early (the report then holds what was collected).
 
 Example (PowerShell, repository root):
     .venv\\Scripts\\python.exe -X utf8 scripts\\probe_com_names.py --i-have-a-com-license
@@ -51,7 +57,12 @@ if str(REPO_ROOT / "src") not in sys.path:  # also works without an editable ins
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from vissim_mcp.config import ENV_FORBID_REAL, forbid_real_enabled  # noqa: E402
-from vissim_mcp.errors import VissimMcpError, describe_exception, is_connection_error  # noqa: E402
+from vissim_mcp.errors import (  # noqa: E402
+    ErrorCode,
+    VissimMcpError,
+    describe_exception,
+    is_connection_error,
+)
 from vissim_mcp.resolver import resolve  # noqa: E402
 
 COM_NAMES_MD = REPO_ROOT / "docs" / "com-names.md"
@@ -70,8 +81,11 @@ EXIT_FAILED = 3
 OK = "ok"
 FAILED = "failed"
 SKIPPED = "skipped"
-#: probe outcome -> status word in docs/com-names.md (skipped rows keep their status)
+INCONCLUSIVE = "inconclusive"
+#: probe outcome -> status word in docs/com-names.md (skipped and inconclusive rows keep their status)
 DOC_STATUS = {OK: "verified", FAILED: "rejected"}
+#: Error codes that are evidence against the probed name itself; any other failure is inconclusive.
+NAME_EVIDENCE_CODES = frozenset({ErrorCode.COM_ERROR, ErrorCode.RESOLVE_FAILED})
 _STATUS_WORD_RE = re.compile(r"\b(unverified|documented|verified|rejected)\b")
 PROBE_MARK_START = "<!-- probe:auto:start -->"
 PROBE_MARK_END = "<!-- probe:auto:end -->"
@@ -106,6 +120,9 @@ class ProbeState:
     sc_key: Any = None
     sg_key: Any = None
     paused_at_break: bool = False
+    #: exp_break_at_n set IsSimBreakAtActive=True for its retry (the server never does; undone before the
+    #: VISSIM_BREAK_DISABLE_VALUE experiment)
+    break_active_forced: bool = False
     saved: dict[str, Any] = field(default_factory=dict)
     semantics: dict[str, Any] = field(default_factory=dict)
     info: dict[str, Any] = field(default_factory=dict)
@@ -148,6 +165,25 @@ def _try(fn: Callable[[], Any]) -> Any:
 
 def _failed(value: Any) -> bool:
     return isinstance(value, dict) and "error" in value
+
+
+def error_outcome(exc: BaseException) -> Outcome:
+    """The outcome of a probe that raised: ``failed`` only for an error about the name itself (COM_ERROR,
+    RESOLVE_FAILED); a timeout, a lost connection or a Python error of the probe is ``inconclusive``."""
+    if isinstance(exc, VissimMcpError):
+        status = FAILED if exc.code in NAME_EVIDENCE_CODES else INCONCLUSIVE
+        return Outcome(status, f"{exc.code}: {exc.message}"[:_MAX_TEXT])
+    return Outcome(INCONCLUSIVE, f"probe error: {describe_exception(exc, _MAX_TEXT)}")
+
+
+def experiment_error(exc: BaseException) -> dict[str, Any]:
+    """``{"error", "error_code", "inconclusive"}`` of an experiment that raised (:func:`error_outcome`)."""
+    outcome = error_outcome(exc)
+    return {
+        "error": outcome.observed,
+        "error_code": str(exc.code) if isinstance(exc, VissimMcpError) else type(exc).__name__,
+        "inconclusive": outcome.status == INCONCLUSIVE,
+    }
 
 
 def _as_float(value: Any) -> float | None:
@@ -412,15 +448,16 @@ def probe_run_methods(ctx: Any, st: ProbeState) -> Outcome:
     if not st.simulate:
         return Outcome(SKIPPED, "--no-simulation")
     sem = st.semantics
-    errors = {
-        k: v["error"]
+    failures = {
+        k: v
         for k, v in sem.items()
         if isinstance(v, dict)
         and "error" in v
         and k in ("break_at_n", "break_disable_runs_to_end", "single_step_and_stop")
     }
-    if errors:
-        return Outcome(FAILED, f"experiments failed: {_short(errors)}")
+    if failures:
+        status = INCONCLUSIVE if all(v.get("inconclusive") for v in failures.values()) else FAILED
+        return Outcome(status, f"experiments failed: {_short({k: v['error'] for k, v in failures.items()})}")
     step = sem.get("single_step_and_stop", {})
     return Outcome(
         OK,
@@ -440,7 +477,9 @@ def probe_break_disable(ctx: Any, st: ProbeState) -> Outcome:
         return Outcome(SKIPPED, "--no-simulation")
     result = st.semantics.get("break_disable_runs_to_end") or {}
     if "error" in result:
-        return Outcome(FAILED, f"experiment failed: {result['error']}")
+        return Outcome(
+            INCONCLUSIVE if result.get("inconclusive") else FAILED, f"experiment failed: {result['error']}"
+        )
     ran = result.get("ran_to_end")
     return Outcome(
         OK if ran else FAILED,
@@ -472,7 +511,13 @@ def probe_exit(ctx: Any, st: ProbeState) -> Outcome:
     text = f"closed={result.get('closed')}, method={method}, {result.get('elapsed_s')} s"
     if result.get("warnings"):
         text += f"; warnings={_short(result['warnings'])}"
-    return Outcome(OK if method == "exit" else FAILED, text, dict(result))
+    if method == "exit":
+        return Outcome(OK, text, dict(result))
+    save = st.info.get("final_save")
+    if not (isinstance(save, dict) and save.get("saved")):
+        # the network may still have had unsaved changes ("Save changes?" dialog): no verdict on Exit()
+        return Outcome(INCONCLUSIVE, text + f"; the save before close failed: {_short(save)}", dict(result))
+    return Outcome(FAILED, text, dict(result))
 
 
 #: One entry per row of docs/com-names.md (first cell exactly as written there), in table order.
@@ -577,6 +622,11 @@ def discover_keys(ctx: Any, st: ProbeState) -> dict[str, Any]:
     return {"first_link_key": st.first_link_key, "sc_key": st.sc_key, "sg_key": st.sg_key}
 
 
+#: Evaluation.KeepPrevResults = KeepAll: the experiments detect "the run ended" by a new SimulationRuns row,
+#: which a model with KeepCurrent / KeepNone would never show.
+KEEP_ALL = 3
+
+
 def exp_prepare(ctx: Any, st: ProbeState) -> dict[str, Any]:
     vissim = ctx.vissim
     sim = vissim.Simulation
@@ -585,11 +635,18 @@ def exp_prepare(ctx: Any, st: ProbeState) -> dict[str, Any]:
         for name in ("SimPeriod", "SimBreakAt", "UseMaxSimSpeed", "IsSimBreakAtActive")
     }
     st.saved["QuickMode"] = _try(lambda: vissim.Graphics.CurrentNetworkWindow.AttValue("QuickMode"))
+    st.saved["KeepPrevResults"] = _try(lambda: vissim.Evaluation.AttValue("KeepPrevResults"))
     _try(sim.Stop)  # no simulation from an earlier session may be pending
     sim.SetAttValue("SimPeriod", st.period)
     sim.SetAttValue("UseMaxSimSpeed", True)
     _try(lambda: vissim.Graphics.CurrentNetworkWindow.SetAttValue("QuickMode", 1))
-    return {"saved": dict(st.saved), "idle": _sim_state(vissim)}
+    keep_all = _try(lambda: vissim.Evaluation.SetAttValue("KeepPrevResults", KEEP_ALL))
+    return {
+        "saved": dict(st.saved),
+        "set_KeepPrevResults_KeepAll": keep_all,
+        "KeepPrevResults": _try(lambda: vissim.Evaluation.AttValue("KeepPrevResults")),
+        "idle": _sim_state(vissim),
+    }
 
 
 def exp_signal_outside_run(ctx: Any, st: ProbeState) -> dict[str, Any]:
@@ -635,6 +692,7 @@ def exp_break_at_n(ctx: Any, st: ProbeState) -> dict[str, Any]:
     if not paused and data["IsSimBreakAtActive_after_set"] is False:
         data["stopped_before_retry"] = _stop_if_in_run(vissim, runs_before)
         data["retry_set_IsSimBreakAtActive"] = _try(lambda: sim.SetAttValue("IsSimBreakAtActive", True))
+        st.break_active_forced = not _failed(data["retry_set_IsSimBreakAtActive"])
         sim.SetAttValue("SimBreakAt", st.break_at)
         runs_before = _runs_count(vissim)
         data["retry_run"] = _run_continuous(vissim)
@@ -680,7 +738,13 @@ def exp_stale_break(ctx: Any, st: ProbeState) -> dict[str, Any]:
     stale = max(1, st.break_at // 2)
     runs_before = _runs_count(vissim)
     sim.SetAttValue("SimBreakAt", stale)
-    data: dict[str, Any] = {"stale_break": stale, "simsec_before": st.break_at, "runs_before": runs_before}
+    data: dict[str, Any] = {
+        "stale_break": stale,
+        "simsec_before": st.break_at,
+        "runs_before": runs_before,
+        "IsSimBreakAtActive": _try(lambda: sim.AttValue("IsSimBreakAtActive")),
+        "IsSimBreakAtActive_forced_by_probe": st.break_active_forced,
+    }
     data["run"] = _run_continuous(vissim)
     runs_after = data["run"]["SimulationRuns.Count"]
     simsec = _as_float(data["run"]["SimSec"])
@@ -698,13 +762,18 @@ def exp_break_disable(ctx: Any, st: ProbeState) -> dict[str, Any]:
     """A fresh run with SimBreakAt = VISSIM_BREAK_DISABLE_VALUE: does RunContinuous run to the end?"""
     vissim = ctx.vissim
     sim = vissim.Simulation
+    data: dict[str, Any] = {"value": st.break_disable_value}
+    if st.break_active_forced:  # measure in the state the server runs in (it never sets this attribute)
+        saved = st.saved.get("IsSimBreakAtActive")
+        if saved is not None and not _failed(saved):
+            data["restore_IsSimBreakAtActive"] = _try(lambda: sim.SetAttValue("IsSimBreakAtActive", saved))
+            st.break_active_forced = _failed(data["restore_IsSimBreakAtActive"])
+    data["IsSimBreakAtActive"] = _try(lambda: sim.AttValue("IsSimBreakAtActive"))
+    data["IsSimBreakAtActive_forced_by_probe"] = st.break_active_forced
     runs_before = _runs_count(vissim)
     sim.SetAttValue("SimBreakAt", st.break_disable_value)
-    data: dict[str, Any] = {
-        "value": st.break_disable_value,
-        "runs_before": runs_before,
-        "SimBreakAt_read_back": _try(lambda: sim.AttValue("SimBreakAt")),
-    }
+    data["runs_before"] = runs_before
+    data["SimBreakAt_read_back"] = _try(lambda: sim.AttValue("SimBreakAt"))
     data["after"] = _run_continuous(vissim)
     data["last_run"] = _last_run(vissim)
     runs_after = data["after"]["SimulationRuns.Count"]
@@ -754,8 +823,19 @@ def exp_restore(ctx: Any, st: ProbeState) -> dict[str, Any]:
     quick = st.saved.get("QuickMode")
     if quick is not None and not _failed(quick):
         done["QuickMode"] = _try(lambda: vissim.Graphics.CurrentNetworkWindow.SetAttValue("QuickMode", quick))
+    keep = st.saved.get("KeepPrevResults")
+    if keep is not None and not _failed(keep):
+        done["KeepPrevResults"] = _try(lambda: vissim.Evaluation.SetAttValue("KeepPrevResults", keep))
     done["ResumeUpdateGUI"] = _try(lambda: vissim.ResumeUpdateGUI(True))
     return done
+
+
+def save_before_close(ctx: Any, st: ProbeState) -> dict[str, Any]:
+    """SaveNetAs once more right before Exit(): the experiments changed the network, and Exit() must be judged
+    on a clean network (as vissim_close after a save), not on a "Save changes?" dialog the probe caused."""
+    target = st.workdir / "probe_final.inpx"
+    result = _try(lambda: ctx.vissim.SaveNetAs(str(target)))
+    return {"path": str(target), "saved": not _failed(result) and target.is_file(), "result": result}
 
 
 EXPERIMENTS: tuple[tuple[str, Callable[[Any, ProbeState], dict[str, Any]]], ...] = (
@@ -858,15 +938,15 @@ async def run_probe(service: Any, st: ProbeState, log: Callable[[str], None] = p
             for probe in PROBES:
                 if probe.phase != phase:
                     continue
-                if phase == "close":  # Vissim is gone: these only evaluate what was recorded
-                    outcomes[probe.doc_name] = probe.fn(None, st)
-                    continue
                 try:
+                    if phase == "close":  # Vissim is gone: these only evaluate what was recorded
+                        outcomes[probe.doc_name] = probe.fn(None, st)
+                        continue
                     outcomes[probe.doc_name] = await call(probe.fn, f"probe: {probe.doc_name[:40]}")
-                except VissimMcpError as err:
-                    outcomes[probe.doc_name] = Outcome(FAILED, f"{err.code}: {err.message}"[:_MAX_TEXT])
-                    if not service.connected:
-                        raise ProbeAborted(f"the connection to Vissim was lost: {err.message}") from err
+                except Exception as exc:  # also a TypeError on an unexpected return shape: record, go on
+                    outcomes[probe.doc_name] = error_outcome(exc)
+                    if phase != "close" and not service.connected:
+                        raise ProbeAborted(f"the connection to Vissim was lost: {_short(exc)}") from exc
 
         await run_phase("static")
         if st.simulate:
@@ -874,12 +954,18 @@ async def run_probe(service: Any, st: ProbeState, log: Callable[[str], None] = p
                 log(f"experiment: {name}")
                 try:
                     st.semantics[name] = await call(experiment, f"probe: {name}")
-                except VissimMcpError as err:
-                    st.semantics[name] = {"error": f"{err.code}: {err.message}"[:_MAX_TEXT]}
+                except Exception as exc:
+                    st.semantics[name] = experiment_error(exc)
                     if not service.connected:
-                        raise ProbeAborted(f"the connection to Vissim was lost: {err.message}") from err
+                        raise ProbeAborted(f"the connection to Vissim was lost: {_short(exc)}") from exc
         await run_phase("semantics")
         report["process_after_runs"] = process_report(service)
+        try:
+            st.info["final_save"] = await call(
+                save_before_close, "probe: save before close", service.settings.load_timeout_s
+            )
+        except Exception as exc:
+            st.info["final_save"] = experiment_error(exc)
 
         started = time.monotonic()
         try:
@@ -890,6 +976,8 @@ async def run_probe(service: Any, st: ProbeState, log: Callable[[str], None] = p
         await run_phase("close")
     except ProbeAborted as exc:
         report["aborted"] = str(exc)
+    except Exception as exc:  # a bug of the probe itself: keep everything collected so far
+        report["aborted"] = f"unexpected error in the probe: {describe_exception(exc, _MAX_TEXT)}"
     finally:
         if service.connected or service.pid is not None:
             service.shutdown_fast()  # kills only the Vissim this service started
@@ -909,17 +997,17 @@ async def run_probe(service: Any, st: ProbeState, log: Callable[[str], None] = p
 def format_table(report: dict[str, Any]) -> str:
     rows = report.get("probes", [])
     width = min(70, max((len(r["name"]) for r in rows), default=10))
-    lines = [f"{'name':<{width}}  {'status':<7}  observed", f"{'-' * width}  {'-' * 7}  {'-' * 40}"]
+    lines = [f"{'name':<{width}}  {'status':<12}  observed", f"{'-' * width}  {'-' * 12}  {'-' * 40}"]
     for row in rows:
         name = row["name"] if len(row["name"]) <= width else row["name"][: width - 3] + "..."
-        lines.append(f"{name:<{width}}  {row['status']:<7}  {row['observed']}")
+        lines.append(f"{name:<{width}}  {row['status']:<12}  {row['observed']}")
     if report.get("aborted"):
         lines.append(f"\nABORTED: {report['aborted']}")
     return "\n".join(lines)
 
 
 def summary_counts(report: dict[str, Any]) -> dict[str, int]:
-    counts = {OK: 0, FAILED: 0, SKIPPED: 0}
+    counts = {OK: 0, FAILED: 0, INCONCLUSIVE: 0, SKIPPED: 0}
     for row in report.get("probes", []):
         counts[row["status"]] = counts.get(row["status"], 0) + 1
     return counts
@@ -982,10 +1070,16 @@ def update_com_names(text: str, report: dict[str, Any], date: str) -> str:
         cells[status_col] = new_status_cell(cells[status_col], row["status"])
         lines[index] = "| " + " | ".join(cells) + " |"
     counts = summary_counts(report)
+    inconclusive = [row["name"] for row in report.get("probes", []) if row["status"] == INCONCLUSIVE]
+    unclear = (
+        f"{counts[INCONCLUSIVE]} ta aniq natija bermadi (holati o'zgartirilmadi: {', '.join(inconclusive)}), "
+        if inconclusive
+        else ""
+    )
     summary = (
         f"{PROBE_MARK_START}\n"
         f"> Oxirgi `scripts/probe_com_names.py` ishga tushirilishi: {date} — {counts[OK]} ta nom `verified`, "
-        f"{counts[FAILED]} ta `rejected`, {counts[SKIPPED]} ta tekshirilmadi. Xom natijalar: "
+        f"{counts[FAILED]} ta `rejected`, {unclear}{counts[SKIPPED]} ta tekshirilmadi. Xom natijalar: "
         f"docs/test-report-v1.md.\n{PROBE_MARK_END}"
     )
     result = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
@@ -1002,7 +1096,8 @@ def report_section(report: dict[str, Any]) -> str:
     raw = json.dumps(report, ensure_ascii=False, indent=1, default=str)
     return (
         f"\n## probe_com_names.py xom natijalari — {report.get('started')}\n\n"
-        f"Natija: {counts[OK]} ok, {counts[FAILED]} failed, {counts[SKIPPED]} skipped"
+        f"Natija: {counts[OK]} ok, {counts[FAILED]} failed, {counts[INCONCLUSIVE]} inconclusive, "
+        f"{counts[SKIPPED]} skipped"
         + (f"; TO'XTATILDI: {report['aborted']}" if report.get("aborted") else "")
         + "\n\n```text\n"
         + format_table(report)
@@ -1175,7 +1270,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         simulate=not args.no_simulation,
     )
     service = VissimService(settings)
-    report = asyncio.run(run_probe(service, state, log=_log))
+    try:
+        report = asyncio.run(run_probe(service, state, log=_log))
+    except BaseException as exc:  # run_probe keeps its own partial report; this is the last resort
+        service.shutdown_fast()  # kills only the Vissim this service started
+        report = {
+            "aborted": f"the probe stopped: {describe_exception(exc, _MAX_TEXT)}",
+            "probes": [{"name": p.doc_name, "status": SKIPPED, "observed": "not reached"} for p in PROBES],
+        }
     report["interactive_vissim_pids"] = interactive
 
     results = workdir / "probe-results.json"
@@ -1187,7 +1289,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"updated {COM_NAMES_MD} and {TEST_REPORT_MD}")
     if report.get("aborted"):
         return EXIT_FAILED
-    return EXIT_FINDINGS if summary_counts(report)[FAILED] else EXIT_OK
+    counts = summary_counts(report)
+    return EXIT_FINDINGS if counts[FAILED] or counts[INCONCLUSIVE] else EXIT_OK
 
 
 if __name__ == "__main__":

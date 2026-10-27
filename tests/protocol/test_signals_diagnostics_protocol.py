@@ -152,6 +152,46 @@ def test_exec_output_never_reaches_the_protocol_stream(
     assert all(line.startswith(b"{") for line in server.stdout_lines)
     stderr = server.stderr_text()
     assert "EXEC-NOISE sys.stdout" in stderr and "EXEC-NOISE fd1" in stderr
-    records = [r for r in audit_records(isolated_env["audit"]) if r["tool"] == "vissim_exec_python"]
+    records = [
+        r
+        for r in audit_records(isolated_env["audit"])
+        if r["tool"] == "vissim_exec_python" and r.get("phase") != "start"
+    ]
     assert [r["ok"] for r in records] == [True, False, False, False, False]
     assert records[0]["args"] == {"code": code}
+
+
+def test_exec_code_is_audited_before_it_ends_the_server(
+    start_server: StartServer, isolated_env: dict[str, Path]
+) -> None:
+    """Code that ends the process (os._exit) leaves no outcome record: the start record has the code."""
+    server = start_server(env={**SAFE_ENV, "VISSIM_MCP_ALLOW_EXEC": "1"})
+    handshake(server)
+    assert server.call_tool("vissim_connect", timeout=30)["payload"]["ok"] is True
+    code = "import os\nos._exit(7)"
+    server.start_tool_call("vissim_exec_python", {"code": code})
+    assert server.wait(20) == 7
+    records = [r for r in audit_records(isolated_env["audit"]) if r["tool"] == "vissim_exec_python"]
+    assert [(r["phase"], r["args"]) for r in records] == [("start", {"code": code})]
+
+
+def test_exec_child_processes_do_not_inherit_the_protocol_stdin(
+    start_server: StartServer, isolated_env: dict[str, Path]
+) -> None:
+    """A child started without stdin=DEVNULL gets NUL as stdin, not the MCP pipe (it used to hang)."""
+    server = start_server(env={**SAFE_ENV, "VISSIM_MCP_ALLOW_EXEC": "1", "VISSIM_CALL_TIMEOUT_S": "30"})
+    handshake(server)
+    assert server.call_tool("vissim_connect", timeout=30)["payload"]["ok"] is True
+    code = (
+        "import subprocess, sys\n"
+        "child = subprocess.run([sys.executable, '-c', "
+        "'import sys; data = sys.stdin.read(); print(\"CHILD-STDOUT\", len(data))'], timeout=20)\n"
+        "result = child.returncode\n"
+    )
+    executed = server.call_tool("vissim_exec_python", {"code": code}, timeout=40)["payload"]
+    assert executed["ok"] is True and executed["result"] == 0, executed
+    # the session still works: the child read nothing of the protocol stream
+    assert server.call_tool("vissim_health")["payload"]["ok"] is True
+    finish(server)
+    assert all(line.startswith(b"{") for line in server.stdout_lines)
+    assert "CHILD-STDOUT 0" in server.stderr_text()

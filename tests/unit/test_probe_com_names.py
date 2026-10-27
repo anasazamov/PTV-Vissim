@@ -300,3 +300,152 @@ def test_probe_records_a_missing_attribute_as_failed(harness: Callable[..., Harn
     assert row["status"] == probe.FAILED and "read failed" in row["observed"]
     assert probe.summary_counts(report)[probe.FAILED] == 1
     assert "NoSuchAttr" in probe.format_table(report)
+
+
+# --- inconclusive outcomes, partial reports, experiment state
+
+
+def test_error_outcome_needs_evidence_against_the_name() -> None:
+    from vissim_mcp.errors import ErrorCode, VissimMcpError
+
+    assert probe.error_outcome(VissimMcpError(ErrorCode.COM_ERROR, "bad name")).status == probe.FAILED
+    assert probe.error_outcome(VissimMcpError(ErrorCode.RESOLVE_FAILED, "no such")).status == probe.FAILED
+    for code in (
+        ErrorCode.TIMEOUT_HUNG,
+        ErrorCode.NOT_CONNECTED,
+        ErrorCode.SHUTTING_DOWN,
+        ErrorCode.INTERNAL,
+    ):
+        assert probe.error_outcome(VissimMcpError(code, "x")).status == probe.INCONCLUSIVE, code
+    python_error = probe.error_outcome(TypeError("'CDispatch' object is not iterable"))
+    assert python_error.status == probe.INCONCLUSIVE and "TypeError" in python_error.observed
+    hung = probe.experiment_error(VissimMcpError(ErrorCode.TIMEOUT_HUNG, "busy"))
+    assert hung["inconclusive"] is True and hung["error_code"] == "TIMEOUT_HUNG"
+    assert probe.experiment_error(VissimMcpError(ErrorCode.COM_ERROR, "x"))["inconclusive"] is False
+
+
+def test_update_leaves_inconclusive_rows_unchanged_and_lists_them() -> None:
+    text = COM_NAMES.read_text(encoding="utf-8")
+    report = _fake_report({"`SimPeriod`": probe.INCONCLUSIVE, "`SimRes`": probe.OK})
+    updated = probe.update_com_names(text, report, "2026-11-02")
+    rows = {cells[0]: (cells, col) for _, cells, col in probe.table_rows(updated) if col}
+    assert rows["`SimPeriod`"][0][rows["`SimPeriod`"][1]] == "documented"
+    assert rows["`SimRes`"][0][rows["`SimRes`"][1]] == "verified"
+    assert "1 ta aniq natija bermadi (holati o'zgartirilmadi: `SimPeriod`)" in updated
+    assert "1 inconclusive" in probe.report_section(report)
+    assert probe.summary_counts(report)[probe.INCONCLUSIVE] == 1
+
+
+def test_a_python_error_in_a_probe_or_experiment_does_not_lose_the_report(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    st = _state(tmp_path)
+
+    def broken_probe(ctx: object, st: object) -> object:
+        return list(ctx.vissim.Net)  # type: ignore[attr-defined]  # a COM object is not iterable
+
+    def broken_experiment(ctx: object, st: object) -> dict:
+        raise IndexError("rows[0] of an empty result")
+
+    async def scenario() -> dict:
+        probes, experiments = probe.PROBES, probe.EXPERIMENTS
+        try:
+            probe.PROBES = (probe.Probe("`Broken`", "static", broken_probe), *probes)
+            probe.EXPERIMENTS = (
+                *experiments[:-1],
+                ("broken", broken_experiment),
+                experiments[-1],
+            )
+            return await probe.run_probe(h.service, st, log=lambda _m: None)
+        finally:
+            probe.PROBES, probe.EXPERIMENTS = probes, experiments
+
+    report = asyncio.run(scenario())
+    assert "aborted" not in report, report.get("aborted")
+    statuses = {row["name"]: row["status"] for row in report["probes"]}
+    assert statuses.pop("`Broken`") == probe.INCONCLUSIVE
+    assert set(statuses.values()) == {probe.OK}  # every other row was still probed
+    assert report["semantics"]["broken"]["inconclusive"] is True
+    assert "IndexError" in report["semantics"]["broken"]["error"]
+    assert "restore" in report["semantics"] and report["close"]["method"] == "exit"
+    assert h.procs.alive_pids() == set()
+
+
+def test_timeouts_make_the_semantics_rows_inconclusive_not_rejected() -> None:
+    st = probe.ProbeState(model=Path("m.inpx"), layout=None, workdir=Path("."))
+    hung = {"error": "TIMEOUT_HUNG: busy", "error_code": "TIMEOUT_HUNG", "inconclusive": True}
+    st.semantics = {"break_at_n": hung, "break_disable_runs_to_end": hung, "single_step_and_stop": hung}
+    assert probe.probe_run_methods(None, st).status == probe.INCONCLUSIVE
+    assert probe.probe_break_disable(None, st).status == probe.INCONCLUSIVE
+    com = {"error": "COM_ERROR: x", "error_code": "COM_ERROR", "inconclusive": False}
+    st.semantics["break_disable_runs_to_end"] = com
+    assert probe.probe_run_methods(None, st).status == probe.FAILED
+    assert probe.probe_break_disable(None, st).status == probe.FAILED
+
+
+def test_exit_is_judged_only_on_a_saved_network() -> None:
+    st = probe.ProbeState(model=Path("m.inpx"), layout=None, workdir=Path("."))
+    st.close_result = {"closed": True, "method": "terminate", "elapsed_s": 30.0}
+    st.info["final_save"] = {"error": "COM_ERROR: disk full", "inconclusive": False}
+    assert probe.probe_exit(None, st).status == probe.INCONCLUSIVE
+    st.info["final_save"] = {"saved": True}
+    assert probe.probe_exit(None, st).status == probe.FAILED
+    st.close_result = {"closed": True, "method": "exit", "elapsed_s": 1.0}
+    assert probe.probe_exit(None, st).status == probe.OK
+
+
+def test_the_probe_saves_before_close_and_restores_keep_prev_results(
+    harness: Callable[..., Harness], tmp_path: Path
+) -> None:
+    h = harness()
+    st = _state(tmp_path)
+    report = asyncio.run(probe.run_probe(h.service, st, log=lambda _m: None))
+    assert report["info"]["final_save"]["saved"] is True
+    assert (st.workdir / "probe_final.inpx").is_file()
+    prepare = report["semantics"]["prepare"]
+    assert prepare["KeepPrevResults"] == probe.KEEP_ALL and "KeepPrevResults" in prepare["saved"]
+    assert "KeepPrevResults" in report["semantics"]["restore"]
+
+
+class _StubSimulation:
+    """Just enough of Simulation for exp_break_disable: records every write."""
+
+    def __init__(self) -> None:
+        self.values: dict[str, object] = {"IsSimBreakAtActive": True, "SimBreakAt": 120, "SimSec": 0.0}
+        self.writes: list[tuple[str, object]] = []
+
+    def AttValue(self, name: str) -> object:  # noqa: N802 - COM name
+        return self.values.get(name, 0)
+
+    def SetAttValue(self, name: str, value: object) -> None:  # noqa: N802 - COM name
+        self.writes.append((name, value))
+        self.values[name] = value
+
+    def RunContinuous(self) -> None:  # noqa: N802 - COM name
+        self.values["SimSec"] = 0.0
+
+    def Stop(self) -> None:  # noqa: N802 - COM name
+        pass
+
+
+def test_break_disable_is_measured_without_the_forced_is_sim_break_at_active(tmp_path: Path) -> None:
+    sim = _StubSimulation()
+
+    class Vissim:
+        Simulation = sim
+
+        class Net:
+            class SimulationRuns:
+                Count = 0
+
+    class Ctx:
+        vissim = Vissim
+
+    st = probe.ProbeState(model=tmp_path / "m.inpx", layout=None, workdir=tmp_path)
+    st.saved = {"IsSimBreakAtActive": False}
+    st.break_active_forced = True
+    data = probe.exp_break_disable(Ctx, st)
+    assert sim.writes[0] == ("IsSimBreakAtActive", False)  # restored before the break-disable run
+    assert data["IsSimBreakAtActive"] is False and data["IsSimBreakAtActive_forced_by_probe"] is False
+    assert st.break_active_forced is False

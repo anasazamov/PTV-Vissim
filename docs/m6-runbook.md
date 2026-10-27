@@ -55,7 +55,8 @@ o'qiydi), so'ng tajribalarni bajaradi:
 
 | Tajriba | Savol |
 |---|---|
-| `break_at_n` | `SimBreakAt=120` → `RunContinuous()` aynan 120 s da to'xtaydimi? To'xtamasa — `IsSimBreakAtActive=True` bilan qayta urinadi |
+| `prepare` | Joriy qiymatlarni saqlaydi; `Evaluation.KeepPrevResults=3` (KeepAll) qo'yadi — "run tugadi" yangi `SimulationRuns` qatori bilan aniqlanadi; oxirida `restore` hammasini qaytaradi |
+| `break_at_n` | `SimBreakAt=120` → `RunContinuous()` aynan 120 s da to'xtaydimi? To'xtamasa — `IsSimBreakAtActive=True` bilan qayta urinadi (bu qiymat `break_disable_runs_to_end` dan oldin qaytariladi: server uni hech qachon yozmaydi) |
 | `signal_outside_run` | Simulyatsiya yo'q paytda `SigState` yozilsa nima bo'ladi, `ContrByCOM` o'zgaradimi |
 | `signal_while_paused` | Pauzada `SigState="GREEN"` va `SigState=1` yoziladimi, `ContrByCOM` avtomatik `True` bo'ladimi, `False` bilan qaytariladimi |
 | `stale_break` | `SimSec`=120 da `SimBreakAt=60` (o'tib ketgan) qo'yilsa `RunContinuous()` nima qiladi |
@@ -63,11 +64,16 @@ o'qiydi), so'ng tajribalarni bajaradi:
 | `single_step_and_stop` | `RunSingleStep()` bitta qadam yuradimi; `Stop()` dan keyin `SimSec` |
 | `item_by_key_string` | `Net.Links.ItemByKey("1")` (satr kalit) ishlaydimi |
 | jarayonlar | Vissim'ning bola jarayonlari Job Object ichidami (`CREATE_BREAKAWAY_FROM_JOB` kerakmi) |
-| `Exit()` | `vissim_close` qaysi usul bilan yopdi (`exit` / `terminate` / `kill`) va qancha vaqt ketdi |
+| `Exit()` | Yopishdan oldin tarmoq yana saqlanadi (`probe_final.inpx`), so'ng `vissim_close` qaysi usul bilan yopdi (`exit` / `terminate` / `kill`) va qancha vaqt ketdi |
 
 Kutilgan natija: jadval (nom | status | kuzatilgan qiymat), oxirida `raw results: ...\probe-results.json`.
-Chiqish kodi: `0` — hamma nom ishladi; `1` — ba'zi nomlar `failed` (jadvalga qarang); `2` — rad etildi (flag yo'q);
-`3` — Vissim ochilmadi yoki tarmoq yuklanmadi (masalan, litsenziya dialogi).
+Status: `ok`; `failed` — nomning o'ziga qarshi dalil bor (shu nomda `COM_ERROR` / `RESOLVE_FAILED` yoki
+semantik farq); `inconclusive` — aniqlab bo'lmadi (`TIMEOUT_HUNG`, aloqa uzildi, kutilmagan Python xatosi,
+COM xatosisiz tajriba xatosi); `skipped`. Kutilmagan xato butun probe'ni to'xtatmaydi — qolgan nomlar
+tekshiriladi va `probe-results.json` har doim yoziladi.
+Chiqish kodi: `0` — hamma nom ishladi; `1` — ba'zi nomlar `failed` yoki `inconclusive` (jadvalga qarang);
+`2` — rad etildi (flag yo'q); `3` — Vissim ochilmadi, tarmoq yuklanmadi (masalan, litsenziya dialogi) yoki probe
+erta to'xtadi (hisobotda shu paytgacha yig'ilgan natijalar bor).
 
 Natija sizni qoniqtirsa, hujjatlarni yangilang:
 
@@ -75,7 +81,8 @@ Natija sizni qoniqtirsa, hujjatlarni yangilang:
 .\.venv\Scripts\python.exe -X utf8 scripts\probe_com_names.py --i-have-a-com-license --update
 ```
 
-`--update` docs/com-names.md dagi "Holat" ustunini (`verified` / `rejected`) va probe bloki xulosasini yangilaydi
+`--update` docs/com-names.md dagi "Holat" ustunini (`verified` / `rejected`; `inconclusive` va `skipped` qatorlar
+o'zgarmaydi, xulosada alohida sanab o'tiladi) va probe bloki xulosasini yangilaydi
 hamda docs/test-report-v1.md oxiriga xom natijalarni (jadval + JSON) qo'shadi. Natijani `git diff docs` bilan ko'rib
 chiqing.
 

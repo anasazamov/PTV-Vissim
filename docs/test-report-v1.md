@@ -84,7 +84,7 @@ pywin32 yuklanmaydi (`tests/unit/test_real_suite_wiring.py` buni tekshiradi).
   noma'lum.
 - **Testlar:** `tests/real/test_real_break_semantics.py` — `test_raw_break_at_and_break_disable_value` (xom COM:
   120 s da pauza, `SimBreakAt=0` bilan run oxirigacha, run'dan keyingi `SimSec`), `test_stale_break_does_not_break_a_job`
-  (eski `SimBreakAt=250` qolgan holatda job tugaydi), `test_pause_at_signal_state_and_resume` (`pause_at` → signal
+  (model run o'rtasida `SimSec`=120 da pauzada, `SimBreakAt=60` (o'tib ketgan) qolgan holat: xom `RunContinuous()` natijasi yoziladi, shu holatdan boshlangan job tugaydi), `test_pause_at_signal_state_and_resume` (`pause_at` → signal
   holati → resume).
 - **Kutilgan natija:** 3 ta `PASSED`. Aks holda — `VISSIM_BREAK_DISABLE_VALUE` yoki `jobs.py` ga tuzatish (runbook 5-bo'lim).
 - **Natija:** _(to'ldiriladi)_

@@ -200,7 +200,10 @@ async def test_exec_enabled_runs_code_and_audits_it(
     assert isinstance(value["obj"], str)  # a COM object becomes text on the worker thread
     assert result["output"] == "links: 10\n"
     assert h.vissim.attribute("Links", 2, "Name") == "Registon"
-    (record,) = audit_records(isolated_env["audit"], "vissim_exec_python")
+    start, record = audit_records(isolated_env["audit"], "vissim_exec_python")
+    # the code is audited before it runs (phase start), then with its outcome (phase end), same call_id
+    assert start["phase"] == "start" and start["args"]["code"] == code and start["ok"] is None
+    assert record["phase"] == "end" and record["call_id"] == start["call_id"]
     assert record["ok"] is True and record["args"]["code"] == code and record["result_type"] == "dict"
 
 
@@ -241,7 +244,10 @@ async def test_exec_errors(harness: MakeHarness, isolated_env: dict[str, Path]) 
         "result"
     ] == 10
     records = audit_records(isolated_env["audit"], "vissim_exec_python")
-    assert len(records) == 12 and all("code" in r["args"] for r in records)
+    assert all("code" in r["args"] for r in records)
+    # 12 calls; the 5 that reached the worker (raised, com, exited, no_input, Count) also have a start record
+    assert len([r for r in records if r.get("phase") != "start"]) == 12
+    assert len([r for r in records if r.get("phase") == "start"]) == 5
 
 
 async def test_exec_output_is_bounded(harness: MakeHarness) -> None:
@@ -278,3 +284,90 @@ async def test_exec_refused_while_a_job_runs(
     paused = await call(mcp, "vissim_exec_python", {"code": "result = Vissim.Simulation.AttValue('SimSec')"})
     assert paused["ok"] is True and paused["result"] == 1800
     await call(mcp, "vissim_stop_simulation")
+
+
+@pytest.mark.parametrize("raised", ["KeyboardInterrupt", "GeneratorExit", "BaseException('custom')"])
+async def test_exec_base_exceptions_are_errors_of_the_code(harness: MakeHarness, raised: str) -> None:
+    h, mcp = server(harness, EXEC_ON)
+    await call(mcp, "vissim_connect")
+    result = await call(mcp, "vissim_exec_python", {"code": f"print('so far')\nraise {raised}"})
+    error = result["error"]
+    assert error["code"] == "INVALID_ARGUMENT", error
+    assert raised.split("(")[0] in error["message"]
+    assert "line 2" in error["details"]["traceback"] and error["details"]["output"] == "so far\n"
+    assert h.service.connected
+    assert (await call(mcp, "vissim_exec_python", {"code": "result = 1"}))["result"] == 1
+
+
+async def test_exec_timeout_reports_running_code_and_audits_its_late_outcome(
+    harness: MakeHarness, isolated_env: dict[str, Path]
+) -> None:
+    h, mcp = server(harness, {**EXEC_ON, "VISSIM_CALL_TIMEOUT_S": "0.3"})
+    await call(mcp, "vissim_connect")
+    code = (
+        "import time\ntime.sleep(1.0)\nVissim.Net.Links.ItemByKey(1).SetAttValue('Name', 'late')\nresult = 7"
+    )
+    timed_out = await call(mcp, "vissim_exec_python", {"code": code})
+    error = timed_out["error"]
+    assert error["code"] == "TIMEOUT_HUNG"
+    assert "still running" in error["message"] and "modal dialog open" not in error["message"]
+    assert "does not stop the code" in error["hint"] and error["details"]["code_still_running"] is True
+
+    def late_records() -> list[dict[str, Any]]:
+        return [
+            r for r in audit_records(isolated_env["audit"], "vissim_exec_python") if r.get("late_completion")
+        ]
+
+    await eventually(late_records, timeout=10)
+    start, outcome, (late,) = *audit_records(isolated_env["audit"], "vissim_exec_python")[:2], late_records()
+    assert start["phase"] == "start" and outcome["phase"] == "end"
+    assert outcome["error_code"] == "TIMEOUT_HUNG" and outcome["code_still_running"] is True
+    assert late["phase"] == "late" and late["ok"] is True and late["result_type"] == "int"
+    assert late["args"] == {"code": code} and late["call_id"] == start["call_id"] == outcome["call_id"]
+    assert h.vissim.attribute("Links", 1, "Name") == "late"
+    # a COM call of the code that hangs (modal dialog) is reported the same way; the message names both
+    h.vissim.hang_next_call(5)
+    hung = await call(mcp, "vissim_exec_python", {"code": "result = Vissim.Net.Links.Count"})
+    assert hung["error"]["code"] == "TIMEOUT_HUNG" and "modal dialog" in hung["error"]["message"]
+    h.vissim.release_hang()
+
+
+async def test_exec_finished_code_writes_no_late_record(
+    harness: MakeHarness, isolated_env: dict[str, Path]
+) -> None:
+    _h, mcp = server(harness, EXEC_ON)
+    await call(mcp, "vissim_connect")
+    assert (await call(mcp, "vissim_exec_python", {"code": "result = 1 / 0"}))["ok"] is False
+    assert (await call(mcp, "vissim_exec_python", {"code": "result = 1"}))["ok"] is True
+    records = audit_records(isolated_env["audit"], "vissim_exec_python")
+    assert [r["phase"] for r in records] == ["start", "end", "start", "end"]
+
+
+async def test_exec_start_record_failure_is_a_warning(
+    harness: MakeHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h, mcp = server(harness, EXEC_ON)
+    await call(mcp, "vissim_connect")
+    original = h.service.write_audit
+
+    def failing_start(tool: str, fields: Any) -> str | None:
+        if fields.get("phase") == "start":
+            return "START RECORD LOST"
+        return original(tool, fields)
+
+    monkeypatch.setattr(h.service, "write_audit", failing_start)
+    done = await call(mcp, "vissim_exec_python", {"code": "result = 2"})
+    assert done["ok"] is True and "START RECORD LOST" in done["warnings"]
+    failed = await call(mcp, "vissim_exec_python", {"code": "raise ValueError('x')"})
+    assert "START RECORD LOST" in failed["warnings"]
+
+
+def test_exec_tracker() -> None:
+    tracker = diagnostics.ExecTracker()
+    seen: list[dict[str, Any]] = []
+    assert tracker.abandon(seen.append) is False  # queued, never started
+    tracker.start()
+    assert tracker.abandon(seen.append) is True
+    tracker.finish({"ok": True})
+    assert seen == [{"ok": True}]
+    assert tracker.abandon(seen.append) is False  # finished: nothing to report later

@@ -83,3 +83,40 @@ def test_guard_survives_missing_standard_handles(server_env: dict[str, str], clo
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == b"PROTOCOL\n"
+
+
+def test_guard_moves_stdin_off_the_inheritable_standard_handle(server_env: dict[str, str]) -> None:
+    """sys.stdin still reads the client's data; fd 0 (and STD_INPUT_HANDLE) is NUL, so a child process started
+    without stdin=DEVNULL neither blocks on nor reads from the protocol pipe."""
+    script = textwrap.dedent(
+        """
+        import os, subprocess, sys
+        from vissim_mcp import stdio_guard
+        proto = stdio_guard.install()
+        assert sys.stdin.fileno() > 2, sys.stdin.fileno()
+        assert not os.get_inheritable(sys.stdin.fileno())
+        assert os.read(0, 100) == b""  # fd 0 is NUL now
+        child = subprocess.run(
+            [sys.executable, "-c", "import sys; print('CHILD', len(sys.stdin.read()))"],
+            timeout=30, capture_output=True,
+        )
+        assert child.stdout.strip() == b"CHILD 0", child
+        child = subprocess.run(
+            [sys.executable, "-c", "import sys; sys.stderr.write('CHILD2 %d' % len(sys.stdin.read()))"],
+            timeout=30,
+        )
+        line = sys.stdin.buffer.readline()
+        proto.write(b"GOT " + line)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-X", "utf8", "-c", script],
+        input=b'{"jsonrpc":"2.0"}\nsecond line\n',
+        capture_output=True,
+        env=server_env,
+        timeout=90,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", "replace")
+    assert result.stdout == b'GOT {"jsonrpc":"2.0"}\n'
+    assert "CHILD2 0" in result.stderr.decode("utf-8", "replace")
