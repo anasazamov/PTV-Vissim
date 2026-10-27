@@ -75,6 +75,7 @@ PLAN.md 0-bo'lim, 5-tamoyil: **haqiqiy Vissim'da tasdiqlanmagan nom kodga qattiq
 |---|---|---|
 | Job Object `LimitFlags` | Faqat `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (0x2000), PLAN 6.4 bo'yicha; `BREAKAWAY_OK` yo'q | Haqiqiy Vissim (litsenziya yordamchisi, crash reporter, yordam oynasi va h.k.) `CREATE_BREAKAWAY_FROM_JOB` bilan jarayon ochadimi? Ochsa, Windows uni rad etadi (`ERROR_ACCESS_DENIED`). Shunday bo'lsa — flag'ni o'zgartirish faqat loyiha egasining roziligi bilan |
 | `Exit()` javobi | Javob qaytsa ham, `RPC_S_CALL_FAILED` / `RPC_E_DISCONNECTED` bilan tugasa ham jarayon 10 s kutiladi | Haqiqiy Vissim `Exit()` da qanday javob beradi va jarayon qancha vaqtda tugaydi |
+| `ItemByKey` kalit turi | `vissim_set_attribute_bulk` kalitni o'zgartirmasdan uzatadi; `5` va `"5"` takror kalit sifatida rad etiladi. Soxta (fake) kolleksiya satr kalitni butun songa aylantiradi — bu **tasdiqlanmagan** | Butun sonli kalitli kolleksiyada (`Net.Links`) `ItemByKey("5")` ishlaydimi, xato beradimi yoki boshqa obyektni qaytaradimi. Ishlamasa — raqamli satr kalitni `int` ga aylantirish yoki rad etish |
 
 ## Yo'l (fayl) atributlari — `ATTRIBUTE_DENIED` siyosati
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -288,6 +289,41 @@ async def test_save_network_policy_errors(
     ]
 
 
+async def test_save_network_checks_the_layout_next_to_the_target(
+    setup: tuple[Harness, FastMCP], projects: Path, tmp_path: Path, isolated_env: dict[str, Path]
+) -> None:
+    """``<target>.layx`` may be rewritten with the network: a hard link to a read-only original (or a link
+    out of the allowed directories) must be refused before anything is backed up or saved."""
+    h, mcp = await connected(setup)
+    original_layout = projects / "models" / "original" / "city.layx"
+    original_layout.write_text("<original layout/>", encoding="utf-8")
+    linked = projects / "scenarios" / "v2.layx"
+    os.link(original_layout, linked)
+    payload = await call(mcp, "vissim_save_network", {"save_as": "scenarios/v2.inpx"})
+    assert payload["error"]["code"] == "PATH_DENIED"
+    assert payload["error"]["details"]["role"] == "layout"
+    assert "hard links" in payload["error"]["message"] and "v2.layx" in payload["error"]["message"]
+    assert h.vissim.saved_paths == []
+    assert not (projects / "scenarios" / "backups").exists()
+    assert original_layout.stat().st_nlink == 2  # untouched
+    record = audit_records(isolated_env["audit"])[-1]
+    assert record["tool"] == "vissim_save_network" and record["error_code"] == "PATH_DENIED"
+
+    outside = tmp_path / "foreign"
+    outside.mkdir()
+    (outside / "v3.layx").write_text("<foreign/>", encoding="utf-8")
+    try:
+        os.symlink(outside / "v3.layx", projects / "scenarios" / "v3.layx")
+    except OSError:
+        return  # symbolic links need a privilege (or developer mode) on Windows
+    payload = await call(mcp, "vissim_save_network", {"save_as": "scenarios/v3.inpx"})
+    assert payload["error"]["code"] == "PATH_DENIED" and payload["error"]["details"]["role"] == "layout"
+    assert h.vissim.saved_paths == []
+
+    plain = await call(mcp, "vissim_save_network", {"save_as": "scenarios/base.inpx"})
+    assert plain["ok"] is True and plain["layout_backup_path"]  # a normal companion layout is fine
+
+
 async def test_save_network_com_error_names_the_backup(
     setup: tuple[Harness, FastMCP], projects: Path
 ) -> None:
@@ -335,3 +371,23 @@ async def test_save_then_reload_round_trip(setup: tuple[Harness, FastMCP]) -> No
     ]
     assert values == {"Name": "Registon ko'chasi"}
     assert h.service.loaded_file and h.service.loaded_file.endswith("named.inpx")
+
+
+async def test_file_tools_audit_schema_invalid_arguments(
+    setup: tuple[Harness, FastMCP], isolated_env: dict[str, Path]
+) -> None:
+    _h, mcp = await connected(setup)
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("vissim_save_network", {"save_as": 5}),
+        ("vissim_save_network", {"save_as": "scenarios/v9.inpx", "overwrite_loaded": "maybe"}),
+        ("vissim_load_network", {"inpx_path": ["scenarios/base.inpx"]}),
+        ("vissim_load_network", {"inpx_path": "scenarios/base.inpx", "additive": {"x": 1}}),
+    ]
+    for name, arguments in cases:
+        payload = await call(mcp, name, arguments)
+        assert payload["error"]["code"] == "INVALID_ARGUMENT", arguments
+    records = [r for r in audit_records(isolated_env["audit"]) if r["tool"] != "vissim_connect"]
+    assert [(r["tool"], r["error_code"]) for r in records] == [(n, "INVALID_ARGUMENT") for n, _a in cases]
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    save = tools["vissim_save_network"].inputSchema["properties"]
+    assert save["save_as"]["type"] == "string" and save["overwrite_loaded"]["type"] == "boolean"

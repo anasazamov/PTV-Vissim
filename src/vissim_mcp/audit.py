@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 from collections.abc import Mapping
 from datetime import datetime
@@ -37,7 +38,10 @@ BULKY_FIELDS = ("old", "new", "changes", "failed", "values", "code", "args")
 
 
 class AuditLog:
-    """Thread-safe appender of JSONL audit records (one file per month, local time)."""
+    """Thread-safe appender of JSONL audit records (one file per month, local time).
+
+    Several server processes may append to the same monthly file: every record is written by one append-only
+    write (:func:`_append`), so concurrent records never overwrite each other."""
 
     def __init__(self, audit_dir: str | os.PathLike[str]) -> None:
         self.directory = Path(audit_dir)
@@ -62,8 +66,7 @@ class AuditLog:
             path = self.path_for(now)
             with self._lock:
                 self.directory.mkdir(parents=True, exist_ok=True)
-                with open(path, "ab") as handle:
-                    handle.write(line)
+                _append(path, line)
                 self.records_written += 1
             return None
         except Exception as exc:
@@ -96,3 +99,74 @@ def _encode(entry: dict[str, Any]) -> bytes:
             keep = ("ts", "tool", "generation", "pid", "dry_run", "ok", "error_code", "server_pid")
             text = dumps({**{key: slim.get(key) for key in keep}, "truncated": True})
     return (text + "\n").encode("utf-8")
+
+
+if sys.platform == "win32":
+    import ctypes
+    from ctypes import wintypes
+
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _CreateFileW = _kernel32.CreateFileW
+    _CreateFileW.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    _CreateFileW.restype = wintypes.HANDLE
+    _WriteFile = _kernel32.WriteFile
+    _WriteFile.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_char_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    _WriteFile.restype = wintypes.BOOL
+    _CloseHandle = _kernel32.CloseHandle
+    _CloseHandle.argtypes = (wintypes.HANDLE,)
+    _CloseHandle.restype = wintypes.BOOL
+
+    _FILE_APPEND_DATA = 0x0004
+    _SYNCHRONIZE = 0x00100000
+    _SHARE_ALL = 0x1 | 0x2 | 0x4  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+    _OPEN_ALWAYS = 4
+    _FILE_ATTRIBUTE_NORMAL = 0x80
+    _INVALID_HANDLE = wintypes.HANDLE(-1).value
+
+    def _append(path: str | os.PathLike[str], data: bytes) -> None:
+        """Append ``data`` with one ``WriteFile`` on a handle opened with ``FILE_APPEND_DATA`` only.
+
+        Python's ``open(path, "ab")`` emulates O_APPEND in the C runtime (seek to the end, then write), which
+        is not atomic across processes: two servers writing at once can both seek to the same end and one
+        record overwrites the other. With append-only access Windows itself places every write at the end.
+        """
+        handle = _CreateFileW(
+            os.fspath(path),
+            _FILE_APPEND_DATA | _SYNCHRONIZE,
+            _SHARE_ALL,
+            None,
+            _OPEN_ALWAYS,
+            _FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if handle is None or handle == _INVALID_HANDLE:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            written = wintypes.DWORD(0)
+            if not _WriteFile(handle, data, len(data), ctypes.byref(written), None):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if written.value != len(data):
+                raise OSError(f"short write to {os.fspath(path)}: {written.value} of {len(data)} bytes")
+        finally:
+            _CloseHandle(handle)
+
+else:
+
+    def _append(path: str | os.PathLike[str], data: bytes) -> None:
+        """Append ``data`` (POSIX ``O_APPEND`` writes are atomic across processes)."""
+        with open(path, "ab") as handle:
+            handle.write(data)

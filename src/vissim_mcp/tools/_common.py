@@ -16,16 +16,18 @@ refusal by a policy and a failure alike.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from types import TracebackType
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import TypeAdapter, ValidationError, WithJsonSchema
 
 from ..config import Settings
 from ..errors import ErrorCode, VissimMcpError
@@ -42,6 +44,27 @@ _ENCODING_FAILURE_TEXT = (
     '{"ok":false,"error":{"code":"INTERNAL","message":"failed to encode the tool result",'
     '"hint":"Internal server error; details are in the server log (vissim_tail_log)."}}'
 )
+
+
+# Lenient argument types for write tools. FastMCP validates arguments against the signature *before* the tool
+# body runs - such a refusal would bypass the audit record and the {"ok": false, "error": ...} format. These
+# types keep the JSON schema the client sees but accept any value; the body validates it (inside its
+# AuditRecord) and raises INVALID_ARGUMENT.
+StringArg = Annotated[Any, WithJsonSchema({"type": "string"})]
+OptionalStringArg = Annotated[Any, WithJsonSchema({"anyOf": [{"type": "string"}, {"type": "null"}]})]
+FlagArg = Annotated[Any, WithJsonSchema({"type": "boolean"})]
+_BOOL_ADAPTER: TypeAdapter[bool] = TypeAdapter(bool)
+
+
+def flag(value: Any, field: str) -> bool:
+    """A boolean argument, accepted as FastMCP would have accepted it (``true``, ``"false"``, ``0``, ...);
+    anything else is ``INVALID_ARGUMENT``."""
+    try:
+        return _BOOL_ADAPTER.validate_python(value)
+    except ValidationError:
+        raise VissimMcpError(
+            ErrorCode.INVALID_ARGUMENT, f"{field} must be true or false, got {value!r}", hint=""
+        ) from None
 
 
 def tool_handler(
@@ -175,7 +198,8 @@ class AuditRecord:
     ``error_message`` (``INTERNAL`` for an unexpected exception, ``cancelled: true`` when the call was
     cancelled) - and the record is written through ``service.write_audit``. Writing never raises: a failure
     becomes a warning in :attr:`warnings` (and in ``VissimMcpError.warnings`` of the error being raised), so
-    the tool result tells the client that the operation is missing from the audit log.
+    the tool result tells the client that the operation is missing from the audit log. Tools use it as
+    ``async with``: the record is then written in a thread, never on the event loop.
     """
 
     def __init__(self, service: Any, tool: str, args: Mapping[str, Any]) -> None:
@@ -197,6 +221,25 @@ class AuditRecord:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool:
+        self._finish(exc, self._write(self._outcome(exc)))
+        return False  # never swallow the exception
+
+    async def __aenter__(self) -> AuditRecord:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        """Like ``__exit__``, but the file write runs in a thread: a slow audit folder (network share,
+        virus scanner, stalled disk) must not block the event loop - every other tool and the shutdown."""
+        fields = self._outcome(exc)
+        self._finish(exc, await asyncio.to_thread(self._write, fields))
+        return False
+
+    def _outcome(self, exc: BaseException | None) -> dict[str, Any]:
         fields = dict(self.fields)
         if exc is None:
             fields["ok"] = True
@@ -210,14 +253,18 @@ class AuditRecord:
             )
         else:  # asyncio.CancelledError and friends: the client went away while the call was running
             fields.update(ok=False, cancelled=True)
+        return fields
+
+    def _write(self, fields: dict[str, Any]) -> str | None:
         try:
-            warning = self._service.write_audit(self.tool, fields)
+            return self._service.write_audit(self.tool, fields)  # type: ignore[no-any-return]
         except Exception as audit_exc:  # write_audit never raises; this is the last line of defence
             log.warning("audit record of %s could not be written: %s", self.tool, audit_exc)
-            warning = f"the audit record of this {self.tool} call could not be written ({_short(audit_exc)})"
+            return f"the audit record of this {self.tool} call could not be written ({_short(audit_exc)})"
+
+    def _finish(self, exc: BaseException | None, warning: str | None) -> None:
         self.written = True
         if warning:
             self.warnings.append(warning)
             if isinstance(exc, VissimMcpError) and warning not in exc.warnings:
                 exc.warnings.append(warning)
-        return False  # never swallow the exception

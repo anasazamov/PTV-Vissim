@@ -18,8 +18,9 @@ r"""File and attribute policy (PLAN 6.7): which files the server may read and wr
   ``CON``, ``COM1``, ... in any component, also with an extension), characters Windows forbids (``<>"|?*``,
   control characters), ``\\?\`` / ``\\.\`` / ``\??\`` prefixes, drive-relative (``D:x.inpx``) and
   root-relative (``\x.inpx``) paths, and extensions outside the whitelist of the operation (case-insensitive).
-* UNC paths (``\\server\share\...``) are denied without touching the network unless an allowed root is itself
-  a UNC path: resolving them can block for a long time and would hand the Windows credentials to that server.
+* UNC paths (``\\server\share\...``, in any mix of ``\`` and ``/``) are denied without touching the network
+  unless their ``\\server\share`` is the share of a UNC allowed root (case-insensitive): resolving them can
+  block for a long time and would hand the Windows credentials to that server.
 * Reading: the file must exist (``FILE_NOT_FOUND``).
 * Writing: never inside a read-only root (``READ_ONLY_PATH`` - checked by path *and* by directory identity, so
   another spelling of the same directory does not help), never onto a directory, never onto a file with more
@@ -169,10 +170,13 @@ class PathPolicy:
         text = os.path.expanduser(raw)
         drive = _check_syntax(text, raw)
         if _WINDOWS:
-            if drive.startswith(("\\\\", "//")) and not any(_is_unc(root) for root in self.allowed_dirs):
+            share = _unc_share(drive)
+            # Decided before any file system call: resolving a UNC path contacts its server (and logs on).
+            if share is not None and share not in self._allowed_shares():
                 raise VissimMcpError(
                     ErrorCode.PATH_DENIED,
-                    f"network (UNC) path {raw!r} is not allowed: no allowed directory is a UNC path",
+                    f"network (UNC) path {raw!r} is not allowed: its server and share are not those of an "
+                    "allowed directory",
                     hint="Use a local path inside VISSIM_ALLOWED_DIRS (vissim_health shows them).",
                 )
         if not os.path.isabs(text):
@@ -189,6 +193,11 @@ class PathPolicy:
             ) from None
 
     # --- internals
+
+    def _allowed_shares(self) -> set[str]:
+        r"""``\\server\share`` (normalised) of every UNC allowed root."""
+        shares = {_unc_share(ntpath.splitdrive(os.fspath(root))[0]) for root in self.allowed_dirs}
+        return {share for share in shares if share is not None}
 
     def _check(self, path: Any, extensions: Sequence[str] | str | None) -> tuple[Path, list[str]]:
         if not self.allowed_dirs:
@@ -362,7 +371,7 @@ def _check_syntax(text: str, raw: str) -> str:
     if bad:
         raise _invalid(raw, f"the characters {''.join(bad)!r} are not allowed in Windows file names")
     if _WINDOWS:
-        if drive and not drive.startswith(("\\\\", "//")) and not rest.startswith(("\\", "/")):
+        if drive and _unc_share(drive) is None and not rest.startswith(("\\", "/")):
             raise _invalid(
                 raw,
                 f"'{drive}' without a backslash is relative to the current directory of that drive; "
@@ -440,8 +449,12 @@ def _link_count(path: Path) -> int:
         return 0
 
 
-def _is_unc(path: Path) -> bool:
-    return ntpath.splitdrive(os.fspath(path))[0].startswith(("\\\\", "//"))
+def _unc_share(drive: str) -> str | None:
+    r"""``\\server\share`` (separators normalised, case-folded) when ``drive`` - the drive part of
+    ``ntpath.splitdrive`` - is a UNC drive, else None. ``splitdrive`` also accepts mixed spellings such as
+    ``\/server/share`` and ``/\server\share``, which Windows opens as ``\\server\share`` too."""
+    normal = drive.replace("/", "\\")
+    return normal.casefold() if normal.startswith("\\\\") else None
 
 
 def _extensions(extensions: Sequence[str] | str) -> tuple[str, ...]:

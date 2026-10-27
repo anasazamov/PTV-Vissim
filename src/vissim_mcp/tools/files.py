@@ -6,7 +6,8 @@ file system checks must not block the MCP session); the COM calls run on the COM
 
 Saving never destroys data silently: an existing target - and the ``.layx`` layout of the same name, which
 Vissim may rewrite with the network - is copied to ``<folder>\backups\`` first, and a file that was loaded in
-this connection is only overwritten with ``overwrite_loaded=true``.
+this connection is only overwritten with ``overwrite_loaded=true``. That layout must pass the write policy
+like the target itself (no hard link, no link into a read-only or foreign directory).
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -24,7 +26,7 @@ from ..errors import ErrorCode, VissimMcpError, describe_exception, is_com_error
 from ..policy import LOAD_LAYOUT_EXT, LOAD_NET_EXT, SAVE_EXT, PathPolicy, make_backup
 from ..service import VissimService
 from ..worker import WorkerContext
-from ._common import AuditRecord, register_tool
+from ._common import AuditRecord, FlagArg, OptionalStringArg, StringArg, flag, register_tool
 from .lifecycle import collection_counts
 
 LAYOUT_SUFFIX = ".layx"
@@ -92,6 +94,26 @@ def backup_before_save(policy: PathPolicy, target: Path) -> dict[str, str]:
     return backups
 
 
+def check_layout_companion(policy: PathPolicy, target: Path) -> list[str]:
+    """The write policy for ``<target>.layx``: Vissim may rewrite it together with the network, so a hard link
+    or a symbolic link into a read-only or foreign directory must be refused like the target itself.
+
+    Only checked when something exists under that name (``lexists``: a broken link is refused too). Returns
+    the policy warnings; raises the policy's ``VissimMcpError`` with ``details.role = "layout"``.
+    """
+    layout = target.with_suffix(LAYOUT_SUFFIX)
+    if not os.path.lexists(layout):
+        return []
+    try:
+        return policy.check_write(layout, LOAD_LAYOUT_EXT)[1]
+    except VissimMcpError as err:
+        err.message = f"the layout file next to the target cannot be overwritten: {err.message}"
+        err.details = {**(err.details or {}), "role": "layout", "layout_path": str(layout)}
+        if not err.hint:
+            err.hint = "Save under a new file name (a name without a .layx file next to it)."
+        raise
+
+
 def require_folder(target: Path) -> None:
     if not target.parent.is_dir():
         raise VissimMcpError(
@@ -114,7 +136,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
     policy = service.policy
 
     async def vissim_load_network(
-        inpx_path: str, layx_path: str | None = None, additive: bool = False
+        inpx_path: StringArg, layx_path: OptionalStringArg = None, additive: FlagArg = False
     ) -> dict[str, Any]:
         """Load a Vissim network file (.inpx) into the connected Vissim, optionally with a layout (.layx).
 
@@ -135,7 +157,8 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         Example: vissim_load_network(inpx_path="scenarios\\base.inpx")
         """
         args = {"inpx_path": inpx_path, "layx_path": layx_path, "additive": additive}
-        with AuditRecord(service, "vissim_load_network", args) as audit:
+        async with AuditRecord(service, "vissim_load_network", args) as audit:
+            additive = flag(additive, "additive")
             service.ensure_connected()
             job = service.active_job()
             if job is not None:
@@ -187,7 +210,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         result["warnings"] = [*warnings, *audit.warnings]
         return result
 
-    async def vissim_save_network(save_as: str, overwrite_loaded: bool = False) -> dict[str, Any]:
+    async def vissim_save_network(save_as: StringArg, overwrite_loaded: FlagArg = False) -> dict[str, Any]:
         """Save the network in Vissim to a .inpx file (SaveNetAs); a file it replaces is backed up first.
 
         save_as must be inside the allowed directories and outside the read-only ones (default
@@ -207,12 +230,14 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         Example: vissim_save_network(save_as="scenarios\\base_v2.inpx")
         """
         args = {"save_as": save_as, "overwrite_loaded": overwrite_loaded}
-        with AuditRecord(service, "vissim_save_network", args) as audit:
+        async with AuditRecord(service, "vissim_save_network", args) as audit:
+            overwrite_loaded = flag(overwrite_loaded, "overwrite_loaded")
             service.ensure_connected()
             target, warnings = await asyncio.to_thread(policy.check_write, save_as, SAVE_EXT)
             audit.update(path=str(target))
             await asyncio.to_thread(require_folder, target)
-            if service.is_loaded_file(target) and not overwrite_loaded:
+            _merge(warnings, await asyncio.to_thread(check_layout_companion, policy, target))
+            if await asyncio.to_thread(service.is_loaded_file, target) and not overwrite_loaded:
                 raise VissimMcpError(
                     ErrorCode.INVALID_ARGUMENT,
                     f"'{target}' is a network file loaded in this session; saving would overwrite it",

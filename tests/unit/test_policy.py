@@ -7,6 +7,7 @@ NTFS alternate data streams, relative paths and the non-ASCII warning.
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from datetime import datetime
@@ -254,6 +255,79 @@ def test_unc_path_is_denied_without_unc_root(policy: PathPolicy) -> None:
     with pytest.raises(VissimMcpError) as excinfo:
         policy.check_read("\\\\server\\share\\net.inpx", LOAD_NET_EXT)
     assert code_of(excinfo) == "PATH_DENIED"
+
+
+def _spy_file_system(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every path given to the calls that resolve a path (they would contact a UNC server)."""
+    touched: list[str] = []
+
+    def spy(original: object, predicate: bool) -> object:
+        def wrapper(path: object, *args: object, **kwargs: object) -> object:
+            text = os.fspath(path)  # type: ignore[arg-type]
+            touched.append(text)
+            if text.replace("/", "\\").startswith("\\\\"):  # never contact a real server from a test
+                if predicate:
+                    return False
+                raise FileNotFoundError(errno.ENOENT, "not found (test)", text)
+            return original(path, *args, **kwargs)  # type: ignore[operator]
+
+        return wrapper
+
+    for name in ("lexists", "exists", "isdir", "isfile"):
+        monkeypatch.setattr(os.path, name, spy(getattr(os.path, name), True))
+    for name in ("realpath", "samefile"):
+        monkeypatch.setattr(os.path, name, spy(getattr(os.path, name), False))
+    monkeypatch.setattr(os, "stat", spy(os.stat, False))
+    return touched
+
+
+UNC_SPELLINGS = [
+    "\\\\srv\\share\\x.inpx",
+    "//srv/share/x.inpx",
+    "\\/srv/share/x.inpx",  # mixed separators: ntpath.splitdrive still sees the UNC drive \/srv/share
+    "/\\srv\\share\\x.inpx",
+    "\\\\/srv/share/x.inpx",
+    "/\\srv/share/x.inpx",
+]
+
+
+@windows_only
+@pytest.mark.parametrize("raw", UNC_SPELLINGS)
+def test_unc_spellings_are_denied_without_touching_the_network(
+    policy: PathPolicy, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    touched = _spy_file_system(monkeypatch)
+    for check in (policy.check_read, policy.check_write):
+        with pytest.raises(VissimMcpError) as excinfo:
+            check(raw, SAVE_EXT)
+        assert code_of(excinfo) == "PATH_DENIED"
+        assert "UNC" in excinfo.value.message
+    assert not [path for path in touched if "srv" in path.lower()]
+
+
+@windows_only
+@pytest.mark.parametrize("raw", UNC_SPELLINGS)
+def test_unc_root_does_not_open_other_servers(
+    tree: dict[str, Path], monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    policy = PathPolicy([tree["root"], "\\\\fileserver\\vissim\\projects"])
+    touched = _spy_file_system(monkeypatch)
+    with pytest.raises(VissimMcpError) as excinfo:
+        policy.check_read(raw, LOAD_NET_EXT)
+    assert code_of(excinfo) == "PATH_DENIED" and "UNC" in excinfo.value.message
+    assert not [path for path in touched if "srv" in path.lower()]
+
+
+@windows_only
+def test_unc_path_on_the_allowed_share_is_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = PathPolicy(["\\\\FileServer\\Vissim\\projects"])
+    touched = _spy_file_system(monkeypatch)
+    resolved, _warnings = policy.check_write("//fileserver/VISSIM/projects/a.inpx", SAVE_EXT)
+    assert str(resolved).lower() == "\\\\fileserver\\vissim\\projects\\a.inpx"
+    assert any("fileserver" in path.lower() for path in touched)  # the allowed share is resolved
+    with pytest.raises(VissimMcpError) as excinfo:
+        policy.check_write("\\\\fileserver\\other\\a.inpx", SAVE_EXT)
+    assert code_of(excinfo) == "PATH_DENIED" and "UNC" in excinfo.value.message
 
 
 def test_non_string_path_is_invalid(policy: PathPolicy) -> None:

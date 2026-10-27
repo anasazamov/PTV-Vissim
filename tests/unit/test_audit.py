@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -115,3 +118,32 @@ async def test_service_write_audit_survives_a_raising_log(service: VissimService
     assert warning is not None and "disk on fire" in warning
     service.audit = None
     assert "disabled" in str(service.write_audit("vissim_x", {}))
+
+
+_WRITER = """
+import sys
+from vissim_mcp.audit import AuditLog
+log = AuditLog(sys.argv[1])
+for index in range(int(sys.argv[3])):
+    assert log.write({"tool": "t", "writer": sys.argv[2], "index": index, "pad": "x" * 300}) is None
+"""
+
+
+def test_several_processes_share_the_monthly_file_without_losing_records(tmp_path: Path) -> None:
+    """Python's "ab" mode is seek-then-write on Windows; concurrent servers lost records with it."""
+    directory = tmp_path / "audit"
+    src = Path(__file__).resolve().parents[2] / "src"
+    env = {**os.environ, "PYTHONPATH": str(src), "PYTHONUTF8": "1"}
+    writers, per_writer = 4, 250
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-X", "utf8", "-c", _WRITER, str(directory), str(n), str(per_writer)], env=env
+        )
+        for n in range(writers)
+    ]
+    assert [proc.wait(timeout=60) for proc in procs] == [0] * writers
+    records = read_records(directory)
+    assert len(records) == writers * per_writer
+    assert {(r["writer"], r["index"]) for r in records} == {
+        (str(n), i) for n in range(writers) for i in range(per_writer)
+    }

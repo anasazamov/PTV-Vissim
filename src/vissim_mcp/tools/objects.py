@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import functools
 import math
-from collections.abc import Mapping, Sequence
-from typing import Any
+import threading
+import time
+from collections.abc import Callable, Mapping, Sequence
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import WithJsonSchema
 
 from ..errors import (
     ErrorCode,
@@ -36,7 +38,7 @@ from ..policy import check_attribute_writable
 from ..resolver import Segment, format_path, is_com_object, parse_path, resolve
 from ..service import VissimService
 from ..worker import WorkerContext
-from ._common import AuditRecord, register_tool
+from ._common import AuditRecord, FlagArg, StringArg, flag, register_tool
 
 MAX_ATTRIBUTES = 200
 MAX_ATTRIBUTE_NAME_CHARS = 256
@@ -53,32 +55,90 @@ _BUDGET_RESERVE_CHARS = 1500
 _PATH_HINT = "Give the path of an object or a collection, e.g. Net.Links[1] or Net.Links."
 
 
-class BulkItem(BaseModel):
-    """One object of vissim_set_attribute_bulk."""
+# Input schemas of the write tools. Their arguments are validated in the tool body (inside the audit record),
+# not by FastMCP: a call refused for the shape of its arguments is audited like any other refusal and gets
+# the usual {"ok": false, "error": {"code": "INVALID_ARGUMENT"}} result (PLAN 6.8, contract section 2).
+_VALUE_SCHEMA: dict[str, Any] = {
+    "type": ["number", "string", "boolean"],
+    "description": "New value of the attribute: a number, a string or a boolean",
+}
+_VALUES_SCHEMA: dict[str, Any] = {"type": "object", "additionalProperties": _VALUE_SCHEMA}
+_ITEMS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "description": "One object of vissim_set_attribute_bulk",
+        "properties": {
+            "key": {
+                "type": ["integer", "string"],
+                "description": 'Key of the object in the collection (ItemByKey), e.g. 5 or "A1"',
+            },
+            "value": _VALUE_SCHEMA,
+        },
+        "required": ["key", "value"],
+        "additionalProperties": False,
+    },
+}
+ValuesArg = Annotated[Any, WithJsonSchema(_VALUES_SCHEMA)]
+ItemsArg = Annotated[Any, WithJsonSchema(_ITEMS_SCHEMA)]
 
-    model_config = ConfigDict(extra="forbid")
+#: Wall-clock budget for naming the unreadable attributes after a failed GetMultipleAttributes: every probe
+#: reads the whole collection, so probing 200 names of a large network could take 200 times the read.
+PROBE_BUDGET_S = 3.0
 
-    key: StrictInt | StrictStr = Field(
-        description='Key of the object in the collection (ItemByKey), e.g. 5 or "A1"'
-    )
-    value: Any = Field(description="New value of the attribute: a number, a string or a boolean")
+Snapshot = tuple[list[tuple[Any, Any]], list[tuple[Any, Any]], list[Any], list[dict[str, Any]]]
 
 
 class WriteProgress:
     """What a write task did so far. Filled on the worker thread and only ever appended to (entries are tuples
     or finished dicts), so the event loop thread can copy it at any time - also while a timed-out task still
-    runs."""
+    runs.
+
+    When the tool gives up on the task (timeout, cancellation, any error) it calls :meth:`abandon`: the task
+    stops before its next ``SetAttValue`` - the client has been told that the call failed - and if it still
+    changes something after that moment (the hung call itself returning), :meth:`task_finished` reports the
+    final state through the callback (a follow-up audit record).
+    """
 
     def __init__(self) -> None:
         self.old: list[tuple[Any, Any]] = []  # (attribute or key, value before)
         self.new: list[tuple[Any, Any]] = []  # (attribute or key, value read back - or planned for a dry run)
         self.written: list[Any] = []  # attributes or keys whose SetAttValue succeeded
         self.failed: list[dict[str, Any]] = []  # {attribute|key, stage: read|write|verify, error}
+        self.cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._finished = False
+        self._late: Callable[[Snapshot], None] | None = None
+        self._abandoned_at: Snapshot | None = None
 
-    def snapshot(
-        self,
-    ) -> tuple[list[tuple[Any, Any]], list[tuple[Any, Any]], list[Any], list[dict[str, Any]]]:
+    def snapshot(self) -> Snapshot:
         return list(self.old), list(self.new), list(self.written), list(self.failed)
+
+    def abandon(self, late: Callable[[Snapshot], None] | None = None) -> Snapshot:
+        """Stop the task before its next write; returns the snapshot the tool reports and audits. ``late`` is
+        called (on the worker thread) with the final snapshot if the task changes anything after this."""
+        with self._lock:
+            self.cancelled.set()
+            snapshot = self.snapshot()
+            if not self._finished:
+                self._late = late
+                self._abandoned_at = snapshot
+            return snapshot
+
+    def task_finished(self) -> None:
+        """Called by the task when it ends, however it ends."""
+        with self._lock:
+            self._finished = True
+            late, before = self._late, self._abandoned_at
+            self._late = None
+        if late is None:
+            return
+        final = self.snapshot()
+        if final != before:
+            try:
+                late(final)
+            except Exception:  # bookkeeping must never break the worker
+                pass
 
 
 # --- value helpers
@@ -175,9 +235,7 @@ def bulk_items(items: Any) -> list[tuple[int | str, Any]]:
     pairs: list[tuple[int | str, Any]] = []
     seen: set[str] = set()
     for index, item in enumerate(items):
-        if isinstance(item, BulkItem):
-            key, value = item.key, item.value
-        elif isinstance(item, Mapping) and set(item) == {"key", "value"}:
+        if isinstance(item, Mapping) and set(item) == {"key", "value"}:
             key, value = item["key"], item["value"]
         else:
             raise _invalid(f"items[{index}] must be an object {{key, value}}")
@@ -190,7 +248,9 @@ def bulk_items(items: Any) -> list[tuple[int | str, Any]]:
                 f"items[{index}].key must be a non-empty string of at most {MAX_ATTRIBUTE_NAME_CHARS} "
                 "characters"
             )
-        marker = str(key).strip()  # Vissim resolves 5 and "5" to the same object
+        # 5 and "5" count as the same key (fail-closed). Whether Vissim's ItemByKey resolves a string key of
+        # an integer-keyed collection is NOT verified (docs/com-names.md, M6 list); keys are passed unchanged.
+        marker = str(key).strip()
         if marker in seen:
             raise _invalid(f"duplicate key {key!r} (items[{index}]); every object may appear only once")
         seen.add(marker)
@@ -307,7 +367,7 @@ def list_objects_task(
     except Exception as exc:
         if is_connection_error(exc) or not is_com_error(exc):
             raise
-        raise _unreadable_attributes(exc, get_multiple, attributes, label) from None
+        raise _unreadable_attributes(exc, get_multiple, attributes, label, ctx) from None
     page, meta = paginate(list(rows or ()), offset, limit, max_rows)
     return {
         "rows": [plain_value(row) if isinstance(row, (list, tuple)) else [plain_value(row)] for row in page],
@@ -316,25 +376,44 @@ def list_objects_task(
 
 
 def _unreadable_attributes(
-    exc: BaseException, get_multiple: Any, attributes: list[str], label: str
+    exc: BaseException,
+    get_multiple: Any,
+    attributes: list[str],
+    label: str,
+    ctx: WorkerContext | None = None,
+    budget_s: float | None = None,
 ) -> VissimMcpError:
     """COM_ERROR for a failed GetMultipleAttributes, naming the attributes that cannot be read (each one is
-    probed on its own - only after a failure)."""
+    probed on its own - only after a failure). Every probe reads the whole collection, so probing stops
+    after ``budget_s`` (default :data:`PROBE_BUDGET_S`); names not probed go to
+    ``details.unchecked_attributes``.
+    """
     error = from_com_error(exc, context=f"GetMultipleAttributes on '{label}'")
     invalid: list[str] = []
+    unchecked: list[str] = []
     if len(attributes) == 1:
         invalid = list(attributes)
     else:
-        for name in attributes:
+        deadline = time.monotonic() + (PROBE_BUDGET_S if budget_s is None else budget_s)
+        for index, name in enumerate(attributes):
+            if index and (time.monotonic() >= deadline or (ctx is not None and ctx.stopping)):
+                unchecked = list(attributes[index:])
+                break
             try:
                 get_multiple((name,))
             except Exception as probe:
                 if is_connection_error(probe):
                     raise
                 invalid.append(name)
+    details: dict[str, Any] = {}
     if invalid:
-        error.details = {**(error.details or {}), "invalid_attributes": invalid}
+        details["invalid_attributes"] = invalid
         error.message = f"{error.message} (cannot read: {', '.join(invalid)})"
+    if unchecked:
+        details["unchecked_attributes"] = unchecked
+        error.message = f"{error.message} ({len(unchecked)} attribute(s) not checked: time limit)"
+    if details:
+        error.details = {**(error.details or {}), **details}
     return error
 
 
@@ -366,8 +445,22 @@ def set_attributes_task(
     """Read all old values, then (unless ``dry_run``) write them, then read them back (PLAN 7.3).
 
     An attribute whose old value cannot be read is not written. Nothing is rolled back when a later write
-    fails; ``progress`` records exactly what happened.
+    fails; ``progress`` records exactly what happened. Stops before the next write once the tool has
+    abandoned the task (``progress.cancelled``).
     """
+    try:
+        _set_attributes(segments, values, dry_run, progress, ctx)
+    finally:
+        progress.task_finished()
+
+
+def _set_attributes(
+    segments: list[Segment],
+    values: list[tuple[str, Any]],
+    dry_run: bool,
+    progress: WriteProgress,
+    ctx: WorkerContext,
+) -> None:
     label = format_path(segments)
     obj = resolve(ctx.vissim, segments)
     _require_object(obj, label)
@@ -392,8 +485,8 @@ def set_attributes_task(
         progress.new.extend(readable)  # the planned values
         return
     for name, value in readable:
-        if ctx.stopping:
-            return  # the connection was replaced: its result is discarded anyway
+        if ctx.stopping or progress.cancelled.is_set():
+            return  # the connection was replaced, or the tool has already reported a failure
         try:
             set_att_value(name, value)
         except Exception as exc:
@@ -405,6 +498,8 @@ def set_attributes_task(
             continue
         progress.written.append(name)
     for name, _value in readable:
+        if ctx.stopping or progress.cancelled.is_set():
+            return
         try:
             progress.new.append((name, plain_value(att_value(name))))
         except Exception as exc:
@@ -423,13 +518,30 @@ def bulk_task(
     progress: WriteProgress,
     ctx: WorkerContext,
 ) -> None:
-    """One COM task: ``ItemByKey(key)`` -> old value -> (unless ``dry_run``) write -> read back, per item."""
+    """One COM task: ``ItemByKey(key)`` -> old value -> (unless ``dry_run``) write -> read back, per item.
+
+    Stops before the next item or write once the tool has abandoned the task (``progress.cancelled``).
+    """
+    try:
+        _bulk(segments, attribute, items, dry_run, progress, ctx)
+    finally:
+        progress.task_finished()
+
+
+def _bulk(
+    segments: list[Segment],
+    attribute: str,
+    items: list[tuple[int | str, Any]],
+    dry_run: bool,
+    progress: WriteProgress,
+    ctx: WorkerContext,
+) -> None:
     label = format_path(segments)
     collection = resolve(ctx.vissim, segments)
     _require_object(collection, label)
     item_by_key = _member(collection, "ItemByKey", label, "a collection")
     for key, value in items:
-        if ctx.stopping:
+        if ctx.stopping or progress.cancelled.is_set():
             return
         try:
             obj = item_by_key(key)
@@ -443,6 +555,8 @@ def bulk_task(
         if dry_run:
             progress.new.append((key, value))
             continue
+        if progress.cancelled.is_set():
+            return
         try:
             obj.SetAttValue(attribute, value)
         except Exception as exc:
@@ -489,11 +603,34 @@ def _audit_map(pairs: list[tuple[Any, Any]]) -> dict[str, Any]:
 
 def _item_pair(item: Any) -> list[Any]:
     """``[key, value]`` of a bulk item as requested (for the audit record), whatever its shape."""
-    if isinstance(item, BulkItem):
-        return [item.key, item.value]
     if isinstance(item, Mapping):
         return [item.get("key"), item.get("value")]
     return [None, item]
+
+
+def late_audit(
+    service: VissimService, tool: str, fields: Mapping[str, Any], key_map: bool
+) -> Callable[[Snapshot], None]:
+    """Callback for :meth:`WriteProgress.abandon`: a follow-up audit record (``late_completion: true``) with
+    the final ``old``/``new``/``written``/``failed`` of a task that changed the model after its tool had
+    already returned an error (PLAN 6.8: every write is audited)."""
+
+    def write(snapshot: Snapshot) -> None:
+        old, new, written, failed = snapshot
+        as_map = _audit_map if key_map else dict
+        service.write_audit(
+            tool,
+            {
+                **fields,
+                "late_completion": True,
+                "old": as_map(old),
+                "new": as_map(new),
+                "written": written,
+                "failed": failed,
+            },
+        )
+
+    return write
 
 
 # --- tools
@@ -594,7 +731,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         return result
 
     async def vissim_set_attributes(
-        path: str, values: dict[str, Any], dry_run: bool = False
+        path: StringArg, values: ValuesArg, dry_run: FlagArg = False
     ) -> dict[str, Any]:
         """Write attributes of one object: read the old values, write the new ones, read them back.
 
@@ -615,24 +752,30 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         """
         args = {"path": path, "values": values, "dry_run": dry_run}
         progress = WriteProgress()
-        with AuditRecord(service, "vissim_set_attributes", args) as audit:
-            audit.update(dry_run=bool(dry_run))
+        async with AuditRecord(service, "vissim_set_attributes", args) as audit:
+            dry_run = flag(dry_run, "dry_run")
+            audit.update(dry_run=dry_run)
             segments = parse_path(path)
             pairs = write_values(values, settings.allow_path_attrs)
             label = format_path(segments)
             audit.update(path=label)
-            task = functools.partial(set_attributes_task, segments, pairs, bool(dry_run), progress)
+            task = functools.partial(set_attributes_task, segments, pairs, dry_run, progress)
+            snapshot: Snapshot | None = None
             try:
                 await service.call(task, task_name="vissim_set_attributes")
+            except BaseException:
+                fields = {"args": args, "dry_run": dry_run, "path": label}
+                snapshot = progress.abandon(late_audit(service, "vissim_set_attributes", fields, False))
+                raise
             finally:
-                old, new, written, failed = progress.snapshot()
+                old, new, written, failed = snapshot or progress.snapshot()
                 audit.update(old=dict(old), new=dict(new), written=written, failed=failed)
         warnings: list[str] = []
         if failed:
             warnings.append(f"{len(failed)} of {len(pairs)} attribute operation(s) failed; see failed")
         return {
             "path": label,
-            "dry_run": bool(dry_run),
+            "dry_run": dry_run,
             "old": dict(old),
             "new": dict(new),
             "failed": failed,
@@ -640,7 +783,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         }
 
     async def vissim_set_attribute_bulk(
-        collection: str, attribute: str, items: list[BulkItem], dry_run: bool = False
+        collection: StringArg, attribute: StringArg, items: ItemsArg, dry_run: FlagArg = False
     ) -> dict[str, Any]:
         """Write one attribute of many objects of a collection in a single COM task (ItemByKey loop).
 
@@ -670,19 +813,25 @@ def register(mcp: FastMCP, service: VissimService) -> None:
             "dry_run": dry_run,
         }
         progress = WriteProgress()
-        with AuditRecord(service, "vissim_set_attribute_bulk", args) as audit:
-            audit.update(dry_run=bool(dry_run))
+        async with AuditRecord(service, "vissim_set_attribute_bulk", args) as audit:
+            dry_run = flag(dry_run, "dry_run")
+            audit.update(dry_run=dry_run)
             segments = parse_path(collection)
             name = attribute_name(attribute)
             check_attribute_writable(name, settings.allow_path_attrs)
             pairs = bulk_items(items)
             label = format_path(segments)
             audit.update(path=label, attribute=name)
-            task = functools.partial(bulk_task, segments, name, pairs, bool(dry_run), progress)
+            task = functools.partial(bulk_task, segments, name, pairs, dry_run, progress)
+            snapshot: Snapshot | None = None
             try:
                 await service.call(task, task_name="vissim_set_attribute_bulk")
+            except BaseException:
+                fields = {"args": args, "dry_run": dry_run, "path": label, "attribute": name}
+                snapshot = progress.abandon(late_audit(service, "vissim_set_attribute_bulk", fields, True))
+                raise
             finally:
-                old, new, written, failed = progress.snapshot()
+                old, new, written, failed = snapshot or progress.snapshot()
                 audit.update(old=_audit_map(old), new=_audit_map(new), written=written, failed=failed)
         new_by_key = dict(new)
         changes = [
@@ -691,7 +840,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         result: dict[str, Any] = {
             "collection": label,
             "attribute": name,
-            "dry_run": bool(dry_run),
+            "dry_run": dry_run,
             "total": len(pairs),
             "updated": len(written),
             "failed": failed[:MAX_FAILED_SHOWN],

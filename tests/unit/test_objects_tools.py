@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,8 @@ from mcp.types import CallToolResult
 from service_harness import Harness
 from vissim_mcp.output import TRUNCATION_HINT, dumps
 from vissim_mcp.server import build_server
-from vissim_mcp.tools.objects import COM_OBJECT_MARKER, MAX_BULK_ITEMS, plain_value
+from vissim_mcp.tools import objects as objects_module
+from vissim_mcp.tools.objects import COM_OBJECT_MARKER, MAX_BULK_ITEMS, WriteProgress, plain_value
 
 
 async def call(mcp: FastMCP, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -434,3 +437,165 @@ async def test_bulk_at_the_item_limit(setup: tuple[Harness, FastMCP]) -> None:
     assert payload["ok"] is True and payload["total"] == MAX_BULK_ITEMS and payload["failed_total"] == 0
     assert payload["changes_total"] == MAX_BULK_ITEMS and payload["changes_truncated"] is True
     assert len(dumps(payload)) <= h.settings.max_result_chars
+
+
+async def test_bulk_uses_exactly_one_com_task(
+    setup: tuple[Harness, FastMCP], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """PLAN 7.3: the ItemByKey loop of a bulk write is ONE service.call, not one per item."""
+    h, mcp = setup
+    tasks: list[str] = []
+    original = h.service.call
+
+    async def counting_call(fn: Any, **kwargs: Any) -> Any:
+        tasks.append(kwargs.get("task_name", ""))
+        return await original(fn, **kwargs)
+
+    monkeypatch.setattr(h.service, "call", counting_call)
+    items = [{"key": key, "value": f"N{key}"} for key in range(1, 11)]
+    payload = await call(
+        mcp, "vissim_set_attribute_bulk", {"collection": "Net.Links", "attribute": "Name", "items": items}
+    )
+    assert payload["updated"] == 10
+    assert tasks == ["vissim_set_attribute_bulk"]
+
+
+async def _late_records(audit_dir: Path, tool: str, timeout_s: float = 5.0) -> list[dict[str, Any]]:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        late = [r for r in audit_records(audit_dir) if r["tool"] == tool and r.get("late_completion")]
+        if late or asyncio.get_running_loop().time() > deadline:
+            return late
+        await asyncio.sleep(0.05)
+
+
+async def test_bulk_stops_writing_after_a_timeout_and_audits_the_late_write(
+    harness: Callable[..., Harness], isolated_env: dict[str, Path]
+) -> None:
+    h = harness({"VISSIM_CALL_TIMEOUT_S": "0.3"})
+    mcp = build_server(h.service, h.settings)
+    await call(mcp, "vissim_connect")
+    h.vissim.hang_on("SetAttValue", 1.0)  # e.g. a Vissim dialog on the first write
+    items = [{"key": 1, "value": "A"}, {"key": 2, "value": "B"}, {"key": 3, "value": "C"}]
+    payload = await call(
+        mcp, "vissim_set_attribute_bulk", {"collection": "Net.Links", "attribute": "Name", "items": items}
+    )
+    assert payload["error"]["code"] == "TIMEOUT_HUNG"
+    first = audit_records(isolated_env["audit"])[-1]
+    assert first["error_code"] == "TIMEOUT_HUNG" and first["written"] == []
+    late = await _late_records(isolated_env["audit"], "vissim_set_attribute_bulk")
+    assert len(late) == 1
+    assert late[0]["written"] == [1] and late[0]["new"] == {"1": "A"}
+    assert late[0]["path"] == "Net.Links" and late[0]["attribute"] == "Name"
+    # the hung write completed, but nothing after it was written
+    assert h.vissim.attribute("Links", 1, "Name") == "A"
+    assert h.vissim.attribute("Links", 2, "Name") == "Link 2"
+    assert h.vissim.attribute("Links", 3, "Name") == "Link 3"
+
+
+async def test_set_attributes_stops_writing_after_a_timeout(
+    harness: Callable[..., Harness], isolated_env: dict[str, Path]
+) -> None:
+    h = harness({"VISSIM_CALL_TIMEOUT_S": "0.3"})
+    mcp = build_server(h.service, h.settings)
+    await call(mcp, "vissim_connect")
+    before = h.vissim.attribute("Links", 1, "NumLanes")
+    h.vissim.hang_on("SetAttValue", 1.0)
+    values = {"Name": "A", "NumLanes": before + 1}
+    payload = await call(mcp, "vissim_set_attributes", {"path": "Net.Links[1]", "values": values})
+    assert payload["error"]["code"] == "TIMEOUT_HUNG"
+    late = await _late_records(isolated_env["audit"], "vissim_set_attributes")
+    assert len(late) == 1 and late[0]["written"] == ["Name"]
+    assert h.vissim.attribute("Links", 1, "Name") == "A"
+    assert h.vissim.attribute("Links", 1, "NumLanes") == before
+
+
+def test_write_progress_without_late_changes_writes_no_late_record() -> None:
+    progress = WriteProgress()
+    seen: list[Any] = []
+    progress.written.append("x")
+    progress.abandon(seen.append)
+    progress.task_finished()  # nothing changed after abandon
+    assert seen == [] and progress.cancelled.is_set()
+    finished = WriteProgress()
+    finished.task_finished()
+    finished.written.append("y")
+    finished.abandon(seen.append)
+    finished.task_finished()
+    assert seen == []
+
+
+async def test_write_tools_audit_schema_invalid_arguments(
+    setup: tuple[Harness, FastMCP], isolated_env: dict[str, Path]
+) -> None:
+    """Arguments FastMCP would have refused before the body ran are refused inside the audit record, with the
+    standard INVALID_ARGUMENT payload (contract section 2, PLAN 6.8)."""
+    _h, mcp = setup
+    bulk = {"collection": "Net.Links", "attribute": "Name"}
+    one = [{"key": 1, "value": "a"}]
+    cases: list[tuple[str, dict[str, Any]]] = [
+        ("vissim_set_attribute_bulk", {**bulk, "items": [{"key": 1}]}),
+        ("vissim_set_attribute_bulk", {**bulk, "items": [{"key": 1.5, "value": 1}]}),
+        ("vissim_set_attribute_bulk", {**bulk, "items": [{"key": True, "value": "a"}]}),
+        ("vissim_set_attribute_bulk", {**bulk, "items": [{"key": 1, "value": "a", "extra": 1}]}),
+        ("vissim_set_attribute_bulk", {**bulk, "items": ["x"]}),
+        ("vissim_set_attribute_bulk", {**bulk, "items": "x"}),
+        ("vissim_set_attribute_bulk", {**bulk, "items": one, "dry_run": "maybe"}),
+        ("vissim_set_attribute_bulk", {"collection": 5, "attribute": "Name", "items": one}),
+        ("vissim_set_attributes", {"path": "Net.Links[1]", "values": "x"}),
+        ("vissim_set_attributes", {"path": "Net.Links[1]", "values": [1, 2]}),
+        ("vissim_set_attributes", {"path": "Net.Links[1]", "values": {"Name": None}}),
+        ("vissim_set_attributes", {"path": ["Net"], "values": {"Name": "a"}}),
+    ]
+    for name, arguments in cases:
+        payload = await call(mcp, name, arguments)
+        assert payload["error"]["code"] == "INVALID_ARGUMENT", (name, arguments)
+    records = audit_records(isolated_env["audit"])
+    expected = [(name, "INVALID_ARGUMENT") for name, _a in cases]
+    assert [(r["tool"], r["error_code"]) for r in records] == expected
+    lenient = await call(
+        mcp, "vissim_set_attributes", {"path": "Net.Links[1]", "values": {"Name": "a"}, "dry_run": "true"}
+    )
+    assert lenient["ok"] is True and lenient["dry_run"] is True
+
+
+async def test_write_tool_schemas_still_describe_the_arguments(setup: tuple[Harness, FastMCP]) -> None:
+    _h, mcp = setup
+    tools = {tool.name: tool for tool in await mcp.list_tools()}
+    bulk = tools["vissim_set_attribute_bulk"].inputSchema
+    item = bulk["properties"]["items"]["items"]
+    assert item["required"] == ["key", "value"] and item["additionalProperties"] is False
+    assert bulk["properties"]["dry_run"]["type"] == "boolean"
+    assert bulk["properties"]["dry_run"]["default"] is False
+    single = tools["vissim_set_attributes"].inputSchema
+    assert single["properties"]["values"]["type"] == "object" and single["required"] == ["path", "values"]
+
+
+async def test_list_objects_probing_is_time_bounded(
+    setup: tuple[Harness, FastMCP], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _h, mcp = setup
+    monkeypatch.setattr(objects_module, "PROBE_BUDGET_S", 0.0)
+    payload = await call(
+        mcp, "vissim_list_objects", {"collection": "Net.Links", "attributes": ["No", "Bogus", "Name"]}
+    )
+    assert payload["error"]["code"] == "COM_ERROR"
+    details = payload["error"]["details"]
+    assert details["unchecked_attributes"] == ["Bogus", "Name"] and "invalid_attributes" not in details
+
+
+async def test_audit_is_written_off_the_event_loop_thread(
+    setup: tuple[Harness, FastMCP], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h, mcp = setup
+    threads: list[threading.Thread] = []
+    original = h.service.write_audit
+
+    def spy(tool: str, fields: Any) -> Any:
+        threads.append(threading.current_thread())
+        return original(tool, fields)
+
+    monkeypatch.setattr(h.service, "write_audit", spy)
+    arguments = {"path": "Net.Links[1]", "values": {"Name": "a"}, "dry_run": True}
+    await call(mcp, "vissim_set_attributes", arguments)
+    assert threads and threading.main_thread() not in threads
