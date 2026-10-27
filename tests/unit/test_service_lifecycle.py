@@ -1294,6 +1294,37 @@ async def test_a_tick_that_meets_a_disconnect_fails_the_job_and_the_connection(h
     assert job.tick_calls == 1
 
 
+async def test_a_tick_failed_in_transit_by_an_ending_vissim_fails_the_connection(
+    harness: MakeHarness,
+) -> None:
+    """A chunk whose call fails with RPC_S_CALL_FAILED while the Vissim process is still ending gets the same
+    call_failed_grace_s as a tool call: the job error carries the restart hint and the connection is lost."""
+    h = harness()
+    h.service.call_failed_grace_s = 5.0  # ends as soon as the process is gone
+    await h.service.connect()
+    process = h.process
+    process.on_end.clear()
+    threading.Timer(0.05, process.end, args=("crash",)).start()  # still alive when the error arrives
+    job = StubJob(generation=h.service.generation, raises=make_com_error(RPC_S_CALL_FAILED))
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: not h.service.connected)
+    (failure,) = job.failures
+    assert failure["hint"] == RESTART_HINT and failure["details"]["disconnected"] is True
+
+
+async def test_a_tick_failed_in_transit_while_vissim_lives_keeps_the_connection(harness: MakeHarness) -> None:
+    h = harness()
+    h.service.call_failed_grace_s = 0.2
+    await h.service.connect()
+    job = StubJob(generation=h.service.generation, raises=make_com_error(RPC_S_CALL_FAILED))
+    h.service.jobs = StubRegistry(job)
+    await eventually(lambda: job.state == "error")
+    (failure,) = job.failures
+    assert "disconnected" not in (failure.get("details") or {})
+    assert h.service.connected is True
+    assert await h.service.call(count_links, task_name="count") == 10
+
+
 async def test_a_job_that_stays_running_after_a_failed_tick_is_not_ticked_again(harness: MakeHarness) -> None:
     """Even if the job's own fail() leaves it 'running' (a bug in the job), its tick is not retried."""
 

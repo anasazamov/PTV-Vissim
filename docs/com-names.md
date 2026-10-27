@@ -48,7 +48,7 @@ PLAN.md 0-bo'lim, 5-tamoyil: **haqiqiy Vissim'da tasdiqlanmagan nom kodga qattiq
 | Nom | Obyekt | Qayerda ishlatiladi | Manba | Holat | Izoh |
 |---|---|---|---|---|---|
 | `SimPeriod` | Simulation | configure, start | AX, EX | documented | min 1, max 2 678 400, standart 3600; simulyatsiya paytida faqat o'qish |
-| `SimRes` | Simulation | configure | AX | documented | 1–1000, standart 10 |
+| `SimRes` | Simulation | configure, `jobs.py` (bitta vaqt qadami: run oxirini aniqlash) | AX | documented | 1–1000, standart 10 |
 | `SimSec` | Simulation | `jobs.py` (bo'lak tekshiruvi) | AX | documented | faqat o'qish. Run tugagandan keyin qiymati (0 yoki period) — **noma'lum**, kod bunga tayanmaydi |
 | `SimBreakAt` | Simulation | `jobs.py` | AX, EX | documented | min 0, standart 0, simulyatsiya paytida tahrirlanadi |
 | `RandSeed` | Simulation | `VISSIM_SEED_ATTR` | AX, EX | documented → configurable | min 1 (EX: "RandSeed 0 is not allowed"), standart 42; simulyatsiya paytida faqat o'qish |

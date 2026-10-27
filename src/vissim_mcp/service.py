@@ -1272,7 +1272,7 @@ class VissimService:
             error = VissimMcpError(
                 ErrorCode.INTERNAL, f"simulation job {job_id}: the simulation step failed: {_short(exc)}"
             )
-        gone = is_disconnect_error(exc) or self._vissim_alive() is False
+        gone = self._connection_gone_sync(exc)
         if gone:
             error.hint = RESTART_HINT
             error.details = {**(error.details or {}), "disconnected": True}
@@ -1287,6 +1287,23 @@ class VissimService:
         self._record_error(error, "background step")
         if gone:
             self._mark_disconnected(worker, error, "background step")
+
+    def _connection_gone_sync(self, exc: BaseException) -> bool:
+        """:meth:`_connection_gone` for the worker thread (a failed chunk): a call that failed in transit
+        while the Vissim process is still ending is watched for ``call_failed_grace_s`` with a short blocking
+        poll - the worker has nothing else to do for a job that just failed."""
+        if is_disconnect_error(exc):
+            return True
+        pid, create_time = self.pid, self.pid_create_time
+        if pid is not None and is_call_failed_error(exc):
+            deadline = time.monotonic() + max(0.0, self.call_failed_grace_s)
+            while True:
+                if not self._pid_alive(pid, create_time):
+                    return True
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(self.process_poll_s)
+        return self._vissim_alive() is False
 
     def _fail_job(self, job: Any, error: VissimMcpError) -> None:
         """``job.fail(error)`` (state ``error``); a job without that hook method is aborted instead."""

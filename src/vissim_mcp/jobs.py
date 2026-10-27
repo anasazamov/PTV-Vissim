@@ -12,24 +12,33 @@ per call - whenever the queue is empty, so tool calls are served between two chu
 
     if stop_requested:  Simulation.Stop(); state = stopped
     target = min(next_break, period, nearest pause_at > position)
+    if target >= period at position 0: target = probe point inside the run (see below)
     if target < period:                                   # chunk branch
         SimBreakAt = target; RunContinuous(); new = SimSec
         new <= simsec          -> error "simulation did not advance"
         new >  target + 1      -> error "did not pause at SimBreakAt"
         new <  target - 1      -> early pause (a stale break point): accepted, one warning
-        else (target reached)  -> pause point: paused; chunk boundary: next_break += chunk
+        else (target reached)  -> pause point: paused (unless a stop is requested); chunk boundary:
+                                  next_break += chunk
     else:                                                 # final branch
         SimBreakAt = VISSIM_BREAK_DISABLE_VALUE; RunContinuous(); new = SimSec
-        simsec < new < period - 1          -> early pause (error after MAX_EARLY_PAUSES in a row)
-        new == simsec (simsec > 0)         -> error "simulation did not advance"
+        simsec < new < period - one step   -> early pause (error after MAX_EARLY_PAUSES in a row)
+        new == simsec                      -> error "simulation did not advance"
         else the run is complete (SimSec after a run is never relied upon): next run (seed, simsec 0) or
         finished
     COM error -> error (code, message, hint, details); a lost connection is raised to the service, which
     fails the job and marks the connection lost.
 
-Status reads (:meth:`SimulationJob.snapshot`) never touch COM: they read the fields the worker writes (plain
-attribute reads are atomic under the GIL); state transitions take a lock so that ``abort`` (event loop) and a
-finishing chunk (worker) cannot overwrite each other - a terminal state is final.
+The final branch never starts at simulation second 0: a run whose first target would be the period (``chunk
+>= period``) first runs a probe chunk to a point inside the run (:func:`probe_point`). Otherwise a
+``RunContinuous`` that did nothing (a stall, a run stopped in the GUI, a break disable value Vissim does not
+understand) would read SimSec 0 - the same as a completed run - and be reported as finished. After the probe
+the final branch always starts from SimSec > 0, where "did not advance" is detectable.
+
+Status reads (:meth:`SimulationJob.snapshot`) never touch COM: they read the fields the worker writes under
+the job's lock (never held across a COM call), so ``run`` and ``simsec`` are always seen together; state
+transitions take the same lock so that ``abort`` (event loop) and a finishing chunk (worker) cannot overwrite
+each other - a terminal state is final.
 
 This module never imports ``pythoncom`` / ``win32com`` (PLAN 4.3).
 """
@@ -164,6 +173,14 @@ def compute_seeds(seed: int | None, runs: int, increment: int) -> list[int | Non
     return seeds
 
 
+def probe_point(period: float) -> float:
+    """The probe target of a run whose first chunk would reach the period: a whole second inside the run
+    (half the period, rounded down), or half the period when the period is shorter than 2 s."""
+    half = period / 2.0
+    whole = float(math.floor(half))
+    return whole if whole >= 1.0 else half
+
+
 class SimulationJob:
     """One simulation job (PLAN 6.6 fields plus ``paused_at``, ``generation`` and ``early_pauses``)."""
 
@@ -179,6 +196,7 @@ class SimulationJob:
         pause_at: list[int],
         seed_attr: str,
         warnings: list[str] | None = None,
+        step_s: float | None = None,
     ) -> None:
         self.id = job_id
         self.generation = int(generation)
@@ -204,6 +222,12 @@ class SimulationJob:
         self.abort_reason: str | None = None
         self.early_pauses = 0
         self.chunks = 0
+        # One simulation time step (1 / SimRes; None when unknown): a final-branch SimSec closer than this to
+        # the period is the end of the run, anything earlier is an early pause.
+        self.step_s = step_s
+        # Wall time spent paused (excluded from the ETA).
+        self._paused_total = 0.0
+        self._paused_since: float | None = None
         # The scheduling position: the last target reached (or the second of an early pause). Pause points
         # at or below it are behind the job, whatever SimSec reads.
         self._position = 0.0
@@ -219,12 +243,20 @@ class SimulationJob:
             if new is JobState.PAUSED and self.state is not JobState.RUNNING:
                 return False
             self.state = new
+            if new is JobState.PAUSED:
+                self._paused_since = time.monotonic()
             if new in TERMINAL_STATES:
                 self.ended_at = time.monotonic()
                 self.paused_at = None
+                self._end_pause(self.ended_at)
             if error is not None:
                 self.error = error
             return True
+
+    def _end_pause(self, now: float) -> None:
+        if self._paused_since is not None:
+            self._paused_total += max(0.0, now - self._paused_since)
+            self._paused_since = None
 
     def abort(self, reason: str) -> None:
         """Mark the job ``aborted`` (restart, close); idempotent, never overwrites a terminal state."""
@@ -239,11 +271,14 @@ class SimulationJob:
         if self._transition(JobState.ERROR, error=dict(error)):
             log.warning("simulation job %s failed: %s", self.id, error.get("message"))
 
-    def request_stop(self) -> None:
-        """A running job stops at the next chunk boundary (the next ``tick``)."""
+    def request_stop(self) -> bool:
+        """A running job stops at the next chunk boundary (the next ``tick``). True when the stop was
+        requested; False in any other state (a paused job is stopped with :meth:`stop_paused`)."""
         with self._lock:
             if self.state is JobState.RUNNING:
                 self.stop_requested = True
+                return True
+            return False
 
     def resume(self) -> None:
         """``paused`` -> ``running``; ``INVALID_ARGUMENT`` in any other state."""
@@ -257,10 +292,17 @@ class SimulationJob:
                 )
             self.state = JobState.RUNNING
             self.paused_at = None
+            self._end_pause(time.monotonic())
 
     def stop_paused(self, vissim: Any) -> str:
-        """Worker thread: end the paused run with ``Simulation.Stop()`` -> ``stopped``. Returns the state."""
+        """Worker thread: end the paused run with ``Simulation.Stop()`` -> ``stopped``. Returns the state.
+
+        A job that was resumed meanwhile (a concurrent ``vissim_resume_simulation``) gets a stop request
+        instead, so it stops at the end of its next chunk."""
         with self._lock:
+            if self.state is JobState.RUNNING:
+                self.stop_requested = True
+                return self.state.value
             if self.state is not JobState.PAUSED:
                 return self.state.value
         vissim.Simulation.Stop()
@@ -290,6 +332,8 @@ class SimulationJob:
             self._transition(JobState.STOPPED)
             return
         target = self._target()
+        if target >= self.period - EPS and self._position <= EPS:
+            target = probe_point(self.period)
         self.chunks += 1
         if target < self.period - EPS:
             self._chunk(simulation, target)
@@ -342,6 +386,11 @@ class SimulationJob:
         while self.next_break <= target + EPS:
             self.next_break += self.chunk
         if any(abs(point - target) <= EPS for point in self.pause_at):
+            if self.stop_requested:  # the stop asked for during this chunk wins over the pause point
+                log.info(
+                    "simulation job %s: pause point %s s skipped, a stop is requested", self.id, _num(new)
+                )
+                return
             with self._lock:
                 if self._transition(JobState.PAUSED):
                     self.paused_at = new
@@ -358,7 +407,7 @@ class SimulationJob:
         simulation.SetAttValue("SimBreakAt", settings.break_disable_value)
         simulation.RunContinuous()
         new = float(simulation.AttValue("SimSec"))
-        if self.simsec + EPS < new < self.period - TARGET_TOLERANCE_S:
+        if self.simsec + EPS < new < self.period - self._end_tolerance():
             self.early_pauses += 1
             if self.early_pauses > MAX_EARLY_PAUSES:
                 raise VissimMcpError(
@@ -370,9 +419,16 @@ class SimulationJob:
                 )
             self._early_pause(new)
             return
-        if self.simsec > EPS and abs(new - self.simsec) <= EPS:
+        if abs(new - self.simsec) <= EPS:  # simsec > 0 here: every run starts with a chunk or a probe
             raise self._did_not_advance(new)
         self._run_complete(simulation)
+
+    def _end_tolerance(self) -> float:
+        """How close to the period a final-branch SimSec counts as the end of the run: one time step (Vissim
+        might report the last step), at most TARGET_TOLERANCE_S; EPS when the step is unknown."""
+        if self.step_s is None or not self.step_s > 0:
+            return EPS
+        return min(self.step_s, TARGET_TOLERANCE_S) + EPS
 
     def _run_complete(self, simulation: Any) -> None:
         if self.state is not JobState.RUNNING:
@@ -384,11 +440,12 @@ class SimulationJob:
             seed = self.seeds[self.run]
             if seed is not None:
                 simulation.SetAttValue(self.seed_attr, seed)
-            self.run += 1
-            self.simsec = 0.0
-            self._position = 0.0
-            self.next_break = float(self.chunk)
-            self.run_started_at = now
+            with self._lock:  # status reads see the old run or the new one, never a mix
+                self.run += 1
+                self.simsec = 0.0
+                self._position = 0.0
+                self.next_break = float(self.chunk)
+                self.run_started_at = now
             log.info("simulation job %s: run %d of %d started (seed %s)", self.id, self.run, self.runs, seed)
             return
         self.simsec = self.period
@@ -398,21 +455,32 @@ class SimulationJob:
     # --- status (no COM)
 
     def percent(self) -> float:
-        if self.state is JobState.FINISHED:
-            return 100.0
-        done = (self.run - 1) * self.period + min(max(self.simsec, 0.0), self.period)
+        with self._lock:
+            if self.state is JobState.FINISHED:
+                return 100.0
+            done = (self.run - 1) * self.period + min(max(self.simsec, 0.0), self.period)
         total = self.runs * self.period
         return round(min(100.0, done / total * 100.0), 2) if total > 0 else 0.0
 
     def snapshot(self) -> dict[str, Any]:
-        """The COM-free status of ``vissim_simulation_status`` (PLAN 7.4)."""
+        """The COM-free status of ``vissim_simulation_status`` (PLAN 7.4). ``eta_s`` leaves out the time the
+        job spent paused."""
+        with self._lock:
+            return self._snapshot()
+
+    def _snapshot(self) -> dict[str, Any]:
         state = self.state
         end = self.ended_at
-        elapsed = (end if end is not None else time.monotonic()) - self.started_at
+        now = end if end is not None else time.monotonic()
+        elapsed = now - self.started_at
         percent = self.percent()
         eta: float | None = None
         if state is JobState.RUNNING and 0 < percent < 100:
-            eta = round(elapsed * (100.0 - percent) / percent, 1)
+            paused = self._paused_total
+            if self._paused_since is not None:
+                paused += max(0.0, now - self._paused_since)
+            active = max(0.0, elapsed - paused)
+            eta = round(active * (100.0 - percent) / percent, 1)
         elif state is JobState.FINISHED:
             eta = 0.0
         paused_at = self.paused_at
@@ -518,6 +586,35 @@ def _read_seed(simulation: Any, seed_attr: str) -> int | None:
     return None
 
 
+def _ended_run(registry: JobRegistry, generation: int, simsec: float, period: float) -> bool:
+    """Whether a SimSec > 0 read before a start is (very likely) the end of a completed run, not a run in
+    progress - real Vissim may read the period after a run (unverified, PLAN 6.6): SimSec at or past the
+    period, or exactly the period of this connection's previous job that finished."""
+    if simsec >= period - EPS:
+        return True
+    previous = registry.current
+    return (
+        previous is not None
+        and previous.state is JobState.FINISHED
+        and previous.generation == generation
+        and abs(simsec - previous.period) <= EPS
+    )
+
+
+def _read_step(simulation: Any) -> float | None:
+    """One simulation time step in seconds (1 / SimRes); None when SimRes cannot be read."""
+    try:
+        resolution = float(simulation.AttValue("SimRes"))
+    except Exception as exc:
+        if is_connection_error(exc):
+            raise
+        log.info("reading SimRes failed: %s", exc)
+        return None
+    if not (math.isfinite(resolution) and resolution > 0):
+        return None
+    return 1.0 / resolution
+
+
 def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings, ctx: Any) -> dict[str, Any]:
     """COM task of ``vissim_start_simulation`` (worker thread): validate against Vissim, apply the first seed,
     create and register the job. Returns its snapshot plus ``chunk``.
@@ -546,9 +643,7 @@ def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings
         )
     warnings: list[str] = []
     simsec = float(simulation.AttValue("SimSec") or 0.0)
-    if simsec > 0:
-        simulation.Stop()
-        warnings.append(f"a simulation run was in progress at {_num(simsec)} s; it was stopped first")
+    stop_first = simsec > 0 and not _ended_run(registry, ctx.generation, simsec, period)
     seed = request.seed
     if seed is None and request.runs > 1:
         seed = _read_seed(simulation, settings.seed_attr)
@@ -562,6 +657,13 @@ def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings
             )
         warnings.append(f"seed not given: the current {settings.seed_attr} {seed} is used for run 1")
     seeds = compute_seeds(seed, request.runs, request.seed_increment)
+    step_s = _read_step(simulation)
+    # Every check that can refuse the call is done: only now may Vissim be changed.
+    if stop_first:
+        simulation.Stop()
+        warnings.insert(
+            0, f"a simulation run may have been in progress (SimSec {_num(simsec)} s); it was stopped first"
+        )
     if seeds[0] is not None:
         simulation.SetAttValue(settings.seed_attr, seeds[0])
     if request.runs > 1:
@@ -576,6 +678,7 @@ def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings
         pause_at=request.pause_at,
         seed_attr=settings.seed_attr,
         warnings=warnings,
+        step_s=step_s,
     )
     registry.add(job)
     log.info(

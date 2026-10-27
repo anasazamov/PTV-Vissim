@@ -157,5 +157,6 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         title="Export a collection to CSV",
         settings=settings,
         read_only=False,
+        destructive=True,  # an existing CSV at csv_path is replaced without a backup
         idempotent=True,
     )

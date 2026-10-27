@@ -7,6 +7,7 @@ is deterministic: one ``tick`` = one chunk.
 from __future__ import annotations
 
 import dataclasses
+import threading
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from vissim_mcp.jobs import (
     StartRequest,
     compute_seeds,
     prepare_job,
+    probe_point,
 )
 
 
@@ -128,13 +130,49 @@ def test_single_run_without_seed_keeps_vissims_seed(settings: Settings) -> None:
     assert vissim.run_records[0]["RandSeed"] == 5
 
 
-def test_chunk_not_smaller_than_the_period_runs_each_run_in_one_tick(settings: Settings) -> None:
+def test_chunk_not_smaller_than_the_period_runs_a_probe_chunk_then_the_rest(settings: Settings) -> None:
+    """The final branch never starts at SimSec 0: each run first breaks at a probe point inside the run."""
     vissim = make_vissim(300)
     job, _ = start(vissim, settings, chunk=300, runs=2, seed=1)
     percents = drive(job, vissim, settings)
-    assert percents == [50.0, 100.0] and job.state is JobState.FINISHED
+    assert percents == [25.0, 50.0, 75.0, 100.0] and job.state is JobState.FINISHED
+    assert [record["SimEnd"] for record in vissim.run_records] == [300, 300]
     job2, _ = start(vissim, settings, chunk=10_000)
-    assert drive(job2, vissim, settings) == [100.0]
+    assert drive(job2, vissim, settings) == [50.0, 100.0]
+
+
+@pytest.mark.parametrize(("period", "expected"), [(600, 300.0), (61, 30.0), (3, 1.0), (1, 0.5)])
+def test_probe_point_lies_inside_the_run(period: int, expected: float) -> None:
+    assert probe_point(period) == expected and 0 < expected < period
+
+
+@pytest.mark.parametrize("simsec_after_run", ["zero", "period"])
+@pytest.mark.parametrize("chunk", [60, 600, 10_000])
+def test_a_stall_at_the_start_of_a_run_is_never_finished(
+    settings: Settings, simsec_after_run: str, chunk: int
+) -> None:
+    """A RunContinuous that does nothing reads SimSec 0 (or the previous run's end) - also with chunk >=
+    period, where the first tick used to be the final branch and took that for a completed run."""
+    vissim = make_vissim(60, stall_runs=1, simsec_after_run=simsec_after_run)
+    job, _ = start(vissim, settings, chunk=chunk)
+    drive(job, vissim, settings)
+    assert job.state is JobState.ERROR and vissim.run_records == []
+    assert job.error is not None and job.error["message"].startswith("simulation did not advance")
+
+
+@pytest.mark.parametrize("simsec_after_run", ["zero", "period"])
+def test_a_stall_at_the_start_of_a_later_run_is_never_finished(
+    settings: Settings, simsec_after_run: str
+) -> None:
+    vissim = make_vissim(600, simsec_after_run=simsec_after_run)
+    job, _ = start(vissim, settings, chunk=600, runs=2, seed=1)
+    while job.run == 1 and job.state is JobState.RUNNING:
+        job.tick(vissim, settings)
+    assert job.run == 2 and len(vissim.run_records) == 1
+    vissim.stall_runs = 1
+    drive(job, vissim, settings)
+    assert job.state is JobState.ERROR and len(vissim.run_records) == 1
+    assert job.error is not None and job.error["message"].startswith("simulation did not advance")
 
 
 def test_percent_is_monotonic_and_ends_at_100(settings: Settings) -> None:
@@ -191,7 +229,7 @@ def test_stale_break_in_the_final_branch_still_finishes(settings: Settings, sims
 
 
 def test_too_many_early_pauses_in_the_final_branch_fail_the_job(settings: Settings) -> None:
-    points = [50 * (k + 1) for k in range(MAX_EARLY_PAUSES + 1)]
+    points = [300 + 50 * (k + 1) for k in range(MAX_EARLY_PAUSES + 1)]  # after the probe chunk (300)
     vissim = make_vissim(600, stale_break_at=points)
     job, _ = start(vissim, settings, chunk=1000)
     drive(job, vissim, settings)
@@ -200,10 +238,46 @@ def test_too_many_early_pauses_in_the_final_branch_fail_the_job(settings: Settin
 
 
 def test_exactly_max_early_pauses_are_tolerated(settings: Settings) -> None:
-    vissim = make_vissim(600, stale_break_at=[50 * (k + 1) for k in range(MAX_EARLY_PAUSES)])
+    vissim = make_vissim(600, stale_break_at=[300 + 50 * (k + 1) for k in range(MAX_EARLY_PAUSES)])
     job, _ = start(vissim, settings, chunk=1000)
     drive(job, vissim, settings)
     assert job.state is JobState.FINISHED
+
+
+@pytest.mark.parametrize("runs", [1, 2])
+@pytest.mark.parametrize("simsec_after_run", ["zero", "period"])
+def test_a_final_pause_just_before_the_period_is_an_early_pause(
+    settings: Settings, runs: int, simsec_after_run: str
+) -> None:
+    """A break within one second of the period (599.5) is not the end of the run: the job continues it."""
+    vissim = make_vissim(600, stale_break_at=[599.5], simsec_after_run=simsec_after_run)
+    job, _ = start(vissim, settings, runs=runs, seed=1)
+    drive(job, vissim, settings)
+    assert job.state is JobState.FINISHED, job.error
+    assert [record["SimEnd"] for record in vissim.run_records] == [600] * runs
+    assert not vissim.sim_active and STALE_BREAK_WARNING in job.warnings
+
+
+def test_a_final_read_one_time_step_before_the_period_ends_the_run(settings: Settings) -> None:
+    """Should Vissim report the last time step after a run (599.9 at SimRes 10), the run is still complete."""
+    vissim = make_vissim(600)
+    job, _ = start(vissim, settings, chunk=500)
+    assert job.step_s == pytest.approx(0.1)
+    job.tick(vissim, settings)
+
+    class EndsAtLastStep:
+        def SetAttValue(self, name: str, value: Any) -> None:
+            pass
+
+        def RunContinuous(self) -> None:
+            pass
+
+        def AttValue(self, name: str) -> Any:
+            assert name == "SimSec"
+            return 599.9
+
+    job._final(EndsAtLastStep(), settings)
+    assert job.state is JobState.FINISHED and job.warnings == []
 
 
 # --- pause_at, resume, stop
@@ -260,6 +334,38 @@ def test_stop_of_a_paused_job(settings: Settings) -> None:
     assert job.stop_paused(vissim) == "stopped"
     assert vissim.run_records[-1]["stopped"] is True and not vissim.sim_active
     assert job.stop_paused(vissim) == "stopped"  # idempotent, no second Stop()
+
+
+def test_a_stop_requested_during_a_chunk_that_ends_at_a_pause_point_stops(settings: Settings) -> None:
+    vissim = make_vissim(600)
+    job, _ = start(vissim, settings, pause_at=[90])
+    job.tick(vissim, settings)  # 0 -> 60
+    assert job.request_stop() is True  # lands while the 60 -> 90 chunk is in RunContinuous:
+    job._chunk(vissim.Simulation, 90.0)  # the rest of that chunk, which ends at the pause point
+    assert job.state is JobState.RUNNING and job.paused_at is None
+    job.tick(vissim, settings)
+    assert job.state is JobState.STOPPED
+    assert vissim.run_records[-1]["stopped"] is True and vissim.run_records[-1]["SimEnd"] == 90
+
+
+def test_request_stop_reports_whether_it_took_effect(settings: Settings) -> None:
+    vissim = make_vissim(600)
+    job, _ = start(vissim, settings, pause_at=[60])
+    job.tick(vissim, settings)
+    assert job.state is JobState.PAUSED and job.request_stop() is False
+    job.resume()
+    assert job.request_stop() is True
+
+
+def test_stop_paused_after_a_concurrent_resume_requests_the_stop(settings: Settings) -> None:
+    vissim = make_vissim(600)
+    job, _ = start(vissim, settings, pause_at=[60])
+    job.tick(vissim, settings)
+    job.resume()  # a vissim_resume_simulation that won the race
+    assert job.stop_paused(vissim) == "running" and job.stop_requested is True
+    assert vissim.sim_active  # no Stop() from stop_paused
+    job.tick(vissim, settings)
+    assert job.state is JobState.STOPPED and not vissim.sim_active
 
 
 # --- errors
@@ -322,6 +428,45 @@ def test_an_ignored_break_fails_the_job(settings: Settings, simsec_after_run: st
     assert job.error is not None and job.error["message"].startswith(message)
 
 
+def test_eta_leaves_out_the_time_spent_paused(settings: Settings) -> None:
+    vissim = make_vissim(600)
+    job, _ = start(vissim, settings, pause_at=[300], chunk=300)
+    job.tick(vissim, settings)
+    assert job.state is JobState.PAUSED
+    job.started_at -= 1000.0  # as if the job had been paused for 1000 s
+    assert job._paused_since is not None
+    job._paused_since -= 1000.0
+    job.resume()
+    snapshot = job.snapshot()
+    assert snapshot["percent"] == 50.0 and snapshot["elapsed_s"] >= 1000
+    assert snapshot["eta_s"] is not None and snapshot["eta_s"] < 10
+
+
+def test_status_never_mixes_the_new_run_with_the_old_simsec(settings: Settings) -> None:
+    """_run_complete updates run and simsec under the job lock, which snapshot() also takes: a status read
+    on another thread in the middle of the update waits for it and sees a consistent pair."""
+    vissim = make_vissim(600)
+    job, _ = start(vissim, settings, chunk=540, runs=3, seed=1)
+    seen: list[float] = []
+    readers: list[threading.Thread] = []
+
+    class Probe(SimulationJob):
+        def __setattr__(self, name: str, value: Any) -> None:
+            super().__setattr__(name, value)
+            if name == "run" and not readers:  # run is incremented, simsec not yet reset
+                reader = threading.Thread(target=lambda: seen.append(self.snapshot()["percent"]))
+                readers.append(reader)
+                reader.start()
+                reader.join(0.2)
+                assert reader.is_alive()  # blocked on the lock until the update is complete
+
+    job.__class__ = Probe
+    while job.run == 1:
+        job.tick(vissim, settings)
+    readers[0].join(5)
+    assert seen == [pytest.approx(100 / 3, abs=0.01)]
+
+
 def test_abort_is_final(settings: Settings) -> None:
     vissim = make_vissim(600)
     job, _ = start(vissim, settings)
@@ -342,10 +487,47 @@ def test_start_stops_a_run_in_progress_first(settings: Settings) -> None:
     vissim.Simulation.RunSingleStep()
     assert vissim.sim_active
     job, data = start(vissim, settings, runs=1, seed=8)
-    assert any("it was stopped first" in warning for warning in data["warnings"])
+    assert data["warnings"][0] == (
+        "a simulation run may have been in progress (SimSec 0.1 s); it was stopped first"
+    )
+    assert vissim.run_records[-1]["stopped"] is True
     assert vissim.simulation_attribute("RandSeed") == 8
     drive(job, vissim, settings)
     assert job.state is JobState.FINISHED
+
+
+@pytest.mark.parametrize("simsec_after_run", ["zero", "period"])
+def test_a_start_after_a_finished_job_does_not_stop_anything(
+    settings: Settings, simsec_after_run: str
+) -> None:
+    """SimSec after a run is unverified (0 or the period): the end of a finished run is no run in progress."""
+    vissim = make_vissim(600, simsec_after_run=simsec_after_run)
+    registry = JobRegistry()
+    first, _ = start(vissim, settings, registry, chunk=600)
+    drive(first, vissim, settings)
+    assert first.state is JobState.FINISHED
+    vissim.calls.clear()
+    second, data = start(vissim, settings, registry)
+    assert data["warnings"] == []
+    assert not any(member.endswith("Stop") for member, _ in vissim.calls)
+    drive(second, vissim, settings)
+    vissim.set_simulation_attribute("SimPeriod", 900)  # SimSec 600 is no longer the period ...
+    third, data = start(vissim, settings, registry)  # ... but it is the end of the finished job
+    assert data["warnings"] == [] and third.period == 900
+    assert not any(member.endswith("Stop") for member, _ in vissim.calls)
+
+
+def test_a_refused_start_leaves_the_run_in_progress_alone(settings: Settings) -> None:
+    vissim = make_vissim(600)
+    vissim.Simulation.RunSingleStep()
+    odd = dataclasses.replace(settings, seed_attr="NoSuchSeedAttribute")
+    with pytest.raises(VissimMcpError) as caught:
+        prepare_job(JobRegistry(), StartRequest(runs=2, default_chunk=60), odd, Ctx(vissim))
+    assert caught.value.message == "seed required for runs>1"
+    with pytest.raises(VissimMcpError):
+        request = StartRequest(runs=3, seed=2**31 - 2, default_chunk=60)
+        prepare_job(JobRegistry(), request, settings, Ctx(vissim))
+    assert vissim.sim_active and vissim.run_records == []
 
 
 def test_start_rejects_a_second_active_job(settings: Settings) -> None:

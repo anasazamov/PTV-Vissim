@@ -270,7 +270,8 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         seed+seed_increment, ... - give a seed for runs > 1 (without one the current seed is read; if it
         cannot be read the call is refused). pause_at pauses every run at those simulation seconds (state
         paused, e.g. to change a signal state); continue with vissim_resume_simulation. Only one job at a
-        time. Written to the audit log.
+        time. A simulation run still in progress in Vissim is stopped first (with a warning). Written to the
+        audit log.
 
         Parameters: runs (1..1000, default 1); seed (>= 1); seed_increment (>= 1, default 1); chunk_sim_s
         (default VISSIM_CHUNK_SIM_S); pause_at - simulation seconds strictly between 0 and the period.
@@ -407,12 +408,15 @@ def register(mcp: FastMCP, service: VissimService) -> None:
             elif connection_warnings(job):
                 job.abort("stopped while the connection to Vissim was lost")
                 warnings.append(LOST_CONNECTION_WARNING)
-            elif job.state is JobState.RUNNING:
-                job.request_stop()
-            else:
+            elif not job.request_stop():
+                # Paused - also when the worker paused the job after the state check above. stop_paused
+                # turns a job resumed meanwhile into a stop request.
                 await service.call(
                     functools.partial(stop_paused_task, job), task_name="vissim_stop_simulation"
                 )
+                stopping = job.state is JobState.STOPPED or job.stop_requested
+                if not stopping:
+                    warnings.append(f"simulation job {job.id} is {job.state.value}; it was not stopped")
             audit.update(state_after=job.state.value)
         return {
             "job_id": job.id,
@@ -437,6 +441,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         title="Start a simulation job",
         settings=settings,
         read_only=False,
+        destructive=True,  # a simulation run in progress in Vissim is stopped first
         idempotent=False,
     )
     register_tool(

@@ -285,6 +285,67 @@ async def test_a_lost_vissim_fails_the_job_and_the_connection(harness: MakeHarne
     assert (await call(mcp, "vissim_health"))["connected"] is False
 
 
+async def test_destructive_annotations(harness: MakeHarness) -> None:
+    h = harness()
+    tools = {tool.name: tool for tool in await build_server(h.service, h.settings).list_tools()}
+    for name in ("vissim_start_simulation", "vissim_stop_simulation", "vissim_export_csv"):
+        annotations = tools[name].annotations
+        assert annotations is not None and annotations.destructiveHint is True, name
+
+
+async def test_stop_and_resume_of_an_unknown_job(harness: MakeHarness) -> None:
+    h, mcp = await connected(harness)
+    for name in ("vissim_stop_simulation", "vissim_resume_simulation"):
+        assert (await call(mcp, name))["error"]["code"] == "JOB_NOT_FOUND"
+        assert (await call(mcp, name, {"job_id": "sim-nope"}))["error"]["code"] == "JOB_NOT_FOUND"
+
+
+async def test_a_paused_job_after_the_connection_was_lost(harness: MakeHarness) -> None:
+    h, mcp = await connected(harness)
+    h.vissim.set_simulation_attribute("SimPeriod", 600)
+    started = await call(mcp, "vissim_start_simulation", {"pause_at": [60]})
+    assert (await wait_until_done(mcp))["state"] == "paused"
+    h.vissim.crash()
+    lost = await call(mcp, "vissim_get_attributes", {"path": "Simulation", "attributes": ["SimSec"]})
+    assert lost["ok"] is False and not h.service.connected
+    status = await call(mcp, "vissim_simulation_status")
+    assert status["state"] == "paused" and simulation_tools.LOST_CONNECTION_WARNING in status["warnings"]
+    resumed = await call(mcp, "vissim_resume_simulation")
+    assert resumed["error"]["code"] == "NOT_CONNECTED"
+    stopped = await call(mcp, "vissim_stop_simulation", {"job_id": started["job_id"]})
+    assert stopped["ok"] is True and stopped["stopping"] is True and stopped["state"] == "aborted"
+    assert simulation_tools.LOST_CONNECTION_WARNING in stopped["warnings"]
+
+
+async def test_resume_of_a_job_of_a_previous_connection(harness: MakeHarness) -> None:
+    h, mcp = await connected(harness)
+    h.vissim.set_simulation_attribute("SimPeriod", 600)
+    await call(mcp, "vissim_start_simulation", {"pause_at": [60]})
+    assert (await wait_until_done(mcp))["state"] == "paused"
+    job = h.service.jobs.current  # type: ignore[union-attr]
+    job.generation -= 1  # as if a restart had not reached this job
+    refused = await call(mcp, "vissim_resume_simulation")
+    assert refused["error"]["code"] == "NOT_CONNECTED"
+    assert "previous Vissim connection" in refused["error"]["message"]
+    assert job.state.value == "paused"
+    job.generation += 1
+    await call(mcp, "vissim_stop_simulation")
+
+
+async def test_wait_returns_at_once_when_the_connection_is_lost(harness: MakeHarness) -> None:
+    h, mcp = await connected(harness, wall_s_per_sim_s=0.002)
+    h.vissim.set_simulation_attribute("SimPeriod", 3600)
+    await call(mcp, "vissim_start_simulation", {"chunk_sim_s": 10})
+    await eventually(lambda: h.service.jobs.current.simsec > 0)  # type: ignore[union-attr]
+    h.service.connected = False  # what a failed call does; the job is not ticked any more
+    status = await call(mcp, "vissim_wait_simulation", {"max_wait_s": 5})
+    assert status["state"] == "running" and status["waited_s"] < 1.0
+    assert simulation_tools.LOST_CONNECTION_WARNING in status["warnings"]
+    h.service.connected = True
+    await call(mcp, "vissim_stop_simulation")
+    assert (await wait_until_done(mcp))["state"] == "stopped"
+
+
 async def test_status_never_calls_com(harness: MakeHarness) -> None:
     h, mcp = await connected(harness)
     h.vissim.set_simulation_attribute("SimPeriod", 600)
