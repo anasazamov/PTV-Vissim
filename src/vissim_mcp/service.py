@@ -18,9 +18,10 @@ Safety: a process is killed only when its PID is known *and* it still has the re
 the process list could not be read before ``Dispatch``, nothing is killed.
 
 Simulation jobs (M4) plug in through ``self.jobs`` (a registry with a ``current`` job, see
-:class:`JobRegistryHook`): the worker's background step ticks the current job when it is ``running`` and
-belongs to the worker's generation; ``restart``/``close`` abort it. A ``tick`` that raises fails its job once
-instead of being retried every poll.
+:class:`JobRegistryHook`; by default :class:`~vissim_mcp.jobs.JobRegistry`): the worker's background step
+ticks the current job when it is ``running`` and belongs to the worker's generation; ``restart``/``close``
+abort it (``close`` then calls ``Simulation.Stop()`` before ``Exit()``, best effort). A ``tick`` that raises
+fails its job once instead of being retried every poll.
 
 Files and audit (M3): ``self.policy`` (:class:`~vissim_mcp.policy.PathPolicy`) checks every path,
 ``self.audit`` (:class:`~vissim_mcp.audit.AuditLog`, by default in ``VISSIM_AUDIT_DIR``) receives one record
@@ -61,6 +62,7 @@ from .errors import (
     is_connection_error,
     is_disconnect_error,
 )
+from .jobs import JobRegistry
 from .logging_setup import flush_logging
 from .policy import PathPolicy
 from .worker import ComWorker, WorkerContext
@@ -71,6 +73,7 @@ log = logging.getLogger(__name__)
 SHUTDOWN_WORKER_JOIN_S = 0.1
 DISPATCH_TASK = "Dispatch"
 EXIT_TASK = "Exit"
+STOP_SIMULATION_TASK = "Simulation.Stop"
 #: Task name prefix of background steps (simulation chunks) shown in health and TIMEOUT_HUNG messages.
 CHUNK_TASK_PREFIX = "simulation chunk"
 ABORTED_STATE = "aborted"
@@ -203,6 +206,11 @@ def _exit_task(ctx: WorkerContext) -> bool:
     return True
 
 
+def _stop_simulation_task(ctx: WorkerContext) -> None:
+    if ctx.vissim is not None:
+        ctx.vissim.Simulation.Stop()
+
+
 def _with_vissim(fn: Callable[[WorkerContext], Any], ctx: WorkerContext) -> Any:
     """Every ``call()`` task needs the COM root; without it (released by ``Exit()``) fail with NOT_CONNECTED
     instead of an ``AttributeError`` deep inside the task."""
@@ -223,6 +231,8 @@ class VissimService:
     close_terminate_wait_s = 5.0
     close_kill_wait_s = 5.0
     restart_kill_wait_s = 5.0
+    #: vissim_close: how long Simulation.Stop() of an aborted job may take before Exit() is called anyway.
+    close_stop_timeout_s = 5.0
     process_poll_s = 0.1
     #: After RPC_S_CALL_FAILED the Vissim process may still be ending: watch it this long before deciding.
     call_failed_grace_s = 1.0
@@ -262,7 +272,7 @@ class VissimService:
         self.shutting_down = False
         self.last_error: dict[str, Any] | None = None
         self.worker: ComWorker | Any | None = None  # ComWorker of the current generation
-        self.jobs: JobRegistryHook | Any | None = None  # JobRegistry (M4)
+        self.jobs: JobRegistryHook | Any | None = JobRegistry()  # simulation jobs (PLAN 6.6)
 
         self.started_at = time.monotonic()
         self._mcp_version = _package_version("mcp")
@@ -975,6 +985,10 @@ class VissimService:
         was_alive = pid is not None and self._pid_alive(pid, create_time)
         outcome: str | None = None  # None: Exit() was not attempted (connection lost, worker gone)
         if self.connected and worker is not None and worker.alive and (pid is None or was_alive):
+            if aborted is not None:
+                stop_warning = await self._stop_simulation(worker)
+                if stop_warning:
+                    warnings.append(stop_warning)
             outcome, exit_warning = await self._call_exit(worker, pid, create_time)
             if exit_warning:
                 warnings.append(exit_warning)
@@ -1045,6 +1059,19 @@ class VissimService:
             "pid": killed_pid,
             "warnings": warnings,
         }
+
+    async def _stop_simulation(self, worker: ComWorker | Any) -> str | None:
+        """Best effort before ``Exit()`` when a job was aborted: ``Simulation.Stop()`` on the worker, waiting
+        at most ``close_stop_timeout_s`` (a chunk still running delays it). Returns a warning or None."""
+        future = worker.submit(_stop_simulation_task, STOP_SIMULATION_TASK)
+        try:
+            done, _result = await _wait_for_worker(future, self.close_stop_timeout_s)
+        except Exception as exc:
+            log.info("Simulation.Stop() before Exit() failed: %s", _short(exc))
+            return f"stopping the simulation before Exit() failed ({_short(exc, 160)})"
+        if not done:
+            return f"Simulation.Stop() did not return within {self.close_stop_timeout_s:g} s; calling Exit()"
+        return None
 
     async def _call_exit(
         self, worker: ComWorker | Any, pid: int | None, create_time: float | None

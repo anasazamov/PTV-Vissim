@@ -24,8 +24,17 @@ OBJECT_TOOLS = [
     "vissim_set_attributes",
     "vissim_set_attribute_bulk",
 ]
-#: Every registered tool in tools/list order (M3: life cycle, files, objects).
-ALL_TOOLS = [*LIFECYCLE_TOOLS, *FILE_TOOLS, *OBJECT_TOOLS]
+SIMULATION_TOOLS = [
+    "vissim_configure_simulation",
+    "vissim_start_simulation",
+    "vissim_simulation_status",
+    "vissim_wait_simulation",
+    "vissim_resume_simulation",
+    "vissim_stop_simulation",
+]
+RESULT_TOOLS = ["vissim_export_csv"]
+#: Every registered tool in tools/list order (M4: life cycle, files, objects, simulation, results).
+ALL_TOOLS = [*LIFECYCLE_TOOLS, *FILE_TOOLS, *OBJECT_TOOLS, *SIMULATION_TOOLS, *RESULT_TOOLS]
 
 
 def handshake(server: StdioServer) -> dict[str, dict[str, Any]]:
