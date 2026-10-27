@@ -19,15 +19,12 @@ from fake_vissim import (
     CO_E_CLASSSTRING,
     CO_E_NOTINITIALIZED,
     CO_E_SERVER_EXEC_FAILURE,
-    PLUMBING_MEMBERS,
     FakeVissim,
     is_registered_progid,
     make_com_error,
 )
-from vissim_mcp.errors import ErrorCode, VissimMcpError, is_com_error
-
-_INVKIND_TO_KIND = {1: "method", 2: "property_get", 4: "property_put", 8: "property_put"}
-_PLUMBING_NAMES = frozenset(name for name, _memid in PLUMBING_MEMBERS)
+from vissim_mcp.backend.base import type_info_members as base_type_info_members
+from vissim_mcp.errors import is_com_error
 
 
 class FakeBackend:
@@ -121,26 +118,10 @@ class FakeBackend:
         return is_com_error(exc)
 
     def type_info_members(self, obj: Any) -> list[dict[str, str]]:
-        """Members from COM type info: plumbing removed, de-duplicated, sorted by (name, kind)."""
-        try:
-            type_info = obj._oleobj_.GetTypeInfo()
-        except AttributeError:
-            raise VissimMcpError(ErrorCode.INFO_UNAVAILABLE, "object has no COM type information") from None
-        except Exception as exc:
-            if is_com_error(exc):
-                raise VissimMcpError(
-                    ErrorCode.INFO_UNAVAILABLE, "object has no COM type information"
-                ) from None
-            raise
-        members: set[tuple[str, str]] = set()
-        for index in range(type_info.GetTypeAttr().cFuncs):
-            desc = type_info.GetFuncDesc(index)
-            name = type_info.GetNames(desc.memid)[0]
-            kind = _INVKIND_TO_KIND.get(desc.invkind)
-            if kind is None or name in _PLUMBING_NAMES:
-                continue
-            members.add((name, kind))
-        return [{"name": name, "kind": kind} for name, kind in sorted(members)]
+        """Members from COM type info - the production rules (``backend.base.type_info_members``): plumbing
+        and restricted members removed, de-duplicated, sorted; ``INFO_UNAVAILABLE`` without type info, while a
+        lost connection raises its COM error (like the real backend)."""
+        return base_type_info_members(obj)
 
     # --- test API
 

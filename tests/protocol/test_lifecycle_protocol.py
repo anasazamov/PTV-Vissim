@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from protocol_helpers import LIFECYCLE_TOOLS, finish, handshake
+from protocol_helpers import ALL_TOOLS, finish, handshake
 
 from stdio_client import StdioServer
 from vissim_mcp.errors import CO_E_SERVER_EXEC_FAILURE, HRESULT_HINTS
@@ -37,7 +37,7 @@ def test_connect_info_restart_close_with_stdout_noise(start_server: StartServer)
     stdout must still carry only JSON-RPC lines."""
     server = start_server(env={**SAFE_ENV, "FAKE_VISSIM_PRINT_STDOUT": "1"})
     tools = handshake(server)
-    assert list(tools) == LIFECYCLE_TOOLS
+    assert list(tools) == ALL_TOOLS
 
     connect = server.call_tool("vissim_connect", timeout=30)
     assert connect["result"]["isError"] is False

@@ -17,7 +17,7 @@ from vissim_mcp.server import EofSignallingReader, ProtocolWriter, build_server
 from vissim_mcp.service import VissimService
 
 
-async def test_build_server_registers_the_lifecycle_tools(service: VissimService, settings: Settings) -> None:
+async def test_build_server_registers_all_tool_modules(service: VissimService, settings: Settings) -> None:
     mcp = build_server(service, settings)
     tools = await mcp.list_tools()
     assert [tool.name for tool in tools] == [
@@ -26,7 +26,17 @@ async def test_build_server_registers_the_lifecycle_tools(service: VissimService
         "vissim_info",
         "vissim_restart",
         "vissim_close",
+        "vissim_load_network",
+        "vissim_save_network",
+        "vissim_describe",
+        "vissim_list_objects",
+        "vissim_get_attributes",
+        "vissim_set_attributes",
+        "vissim_set_attribute_bulk",
     ]
+    for tool in tools:
+        assert tool.description and len(tool.description) < 4096, tool.name
+        assert f"Example: {tool.name}(" in tool.description, tool.name
     tool = tools[1]
     assert tool.annotations is not None and tool.annotations.readOnlyHint is True
     assert tool.annotations.destructiveHint is False

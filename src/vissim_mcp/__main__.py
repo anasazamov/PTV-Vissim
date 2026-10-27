@@ -49,6 +49,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     # Imported only in server mode: --version and --check must work even if the MCP SDK is broken.
+    from vissim_mcp.audit import AuditLog
     from vissim_mcp.logging_setup import setup_logging
     from vissim_mcp.server import run
     from vissim_mcp.service import VissimService
@@ -56,15 +57,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     log_path = setup_logging(settings)
     log = logging.getLogger("vissim_mcp")
     log.info(
-        "vissim-mcp %s starting: pid %d, Python %s, log file %s",
+        "vissim-mcp %s starting: pid %d, Python %s, log file %s, audit directory %s",
         __version__,
         os.getpid(),
         platform.python_version(),
         log_path or "<stderr only>",
+        settings.audit_dir,
     )
     for warning in settings.warnings:
         log.warning("configuration: %s", warning)
-    run(proto_out, VissimService(settings), settings)
+    run(proto_out, VissimService(settings, audit=AuditLog(settings.audit_dir)), settings)
 
 
 def _parser() -> argparse.ArgumentParser:

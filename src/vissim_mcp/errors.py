@@ -74,8 +74,9 @@ DEFAULT_HINTS: dict[ErrorCode, str] = {
 class VissimMcpError(Exception):
     """An error reported to the client as an error payload.
 
-    Payload: ``{"ok": false, "error": {"code", "message", "hint"?, "details"?}}``. ``hint=None`` selects the
-    default hint of the code (if any); pass ``hint=""`` to send no hint at all.
+    Payload: ``{"ok": false, "error": {"code", "message", "hint"?, "details"?}, "warnings"?: [...]}``.
+    ``hint=None`` selects the default hint of the code (if any); pass ``hint=""`` to send no hint at all.
+    ``warnings`` (e.g. "the audit record could not be written") are sent next to the error.
     """
 
     def __init__(
@@ -89,6 +90,7 @@ class VissimMcpError(Exception):
         self.message = str(message)
         self.hint = DEFAULT_HINTS.get(self.code) if hint is None else (hint or None)
         self.details = dict(details) if details else None
+        self.warnings: list[str] = []
         super().__init__(self.message)
 
     def __str__(self) -> str:
@@ -307,6 +309,22 @@ def from_com_error(exc: BaseException, context: str | None = None) -> VissimMcpE
 
     hint = hint_for_hresult(effective_hresult(exc))
     return VissimMcpError(ErrorCode.COM_ERROR, message, hint=hint, details=details or None)
+
+
+def describe_exception(exc: BaseException, limit: int = 200) -> str:
+    """One-line text of an error for result fields like ``errors: {attr: message}``.
+
+    ``VissimMcpError`` -> its message; COM errors -> Vissim's description (EXCEPINFO) or the system text;
+    anything else -> ``"<Type>: <text>"``. Whitespace is collapsed, the text is cut to ``limit`` characters.
+    """
+    if isinstance(exc, VissimMcpError):
+        text = exc.message
+    elif is_com_error(exc):
+        text = from_com_error(exc).message
+    else:
+        text = f"{type(exc).__name__}: {exc}"
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _excepinfo_text(excepinfo: tuple[Any, ...] | None, index: int) -> str | None:

@@ -9,6 +9,9 @@ A tool body is an ``async`` function that returns a dict of result fields (witho
   ``INTERNAL`` (traceback to the log, short message to the client);
 * converts values with ``to_jsonable`` and fits the result into ``VISSIM_MAX_RESULT_CHARS``;
 * logs tool name, outcome and duration at INFO - never argument or attribute values.
+
+:class:`AuditRecord` gives every write tool exactly one audit record per call (PLAN 6.8) - for a success, a
+refusal by a policy and a failure alike.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from types import TracebackType
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -107,7 +111,7 @@ async def _run_body(
     try:
         fields = await body(*args, **kwargs)
     except VissimMcpError as err:
-        return error_payload(err)
+        return error_payload(err, err.warnings)
     except Exception as exc:
         log.exception("tool %s failed with an unexpected error", name)
         return error_payload(
@@ -161,3 +165,59 @@ def _short(exc: BaseException) -> str:
     if len(text) > _MAX_INTERNAL_MESSAGE_CHARS:
         text = text[: _MAX_INTERNAL_MESSAGE_CHARS - 3] + "..."
     return text
+
+
+class AuditRecord:
+    """Context manager writing exactly one audit record for one write-tool call (PLAN 6.8).
+
+    ``fields`` collects the record (``args`` first; ``old``, ``new``, ``dry_run``, ``sha256``, ... via
+    :meth:`update`). On exit the outcome is added - ``ok: true``, or ``ok: false`` with ``error_code`` and
+    ``error_message`` (``INTERNAL`` for an unexpected exception, ``cancelled: true`` when the call was
+    cancelled) - and the record is written through ``service.write_audit``. Writing never raises: a failure
+    becomes a warning in :attr:`warnings` (and in ``VissimMcpError.warnings`` of the error being raised), so
+    the tool result tells the client that the operation is missing from the audit log.
+    """
+
+    def __init__(self, service: Any, tool: str, args: Mapping[str, Any]) -> None:
+        self._service = service
+        self.tool = tool
+        self.fields: dict[str, Any] = {"args": dict(args)}
+        self.warnings: list[str] = []
+        self.written = False
+
+    def update(self, **fields: Any) -> None:
+        self.fields.update(fields)
+
+    def __enter__(self) -> AuditRecord:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> bool:
+        fields = dict(self.fields)
+        if exc is None:
+            fields["ok"] = True
+        elif isinstance(exc, VissimMcpError):
+            fields.update(ok=False, error_code=exc.code.value, error_message=exc.message)
+        elif isinstance(exc, Exception):
+            fields.update(
+                ok=False,
+                error_code=ErrorCode.INTERNAL.value,
+                error_message=f"{type(exc).__name__}: {_short(exc)}",
+            )
+        else:  # asyncio.CancelledError and friends: the client went away while the call was running
+            fields.update(ok=False, cancelled=True)
+        try:
+            warning = self._service.write_audit(self.tool, fields)
+        except Exception as audit_exc:  # write_audit never raises; this is the last line of defence
+            log.warning("audit record of %s could not be written: %s", self.tool, audit_exc)
+            warning = f"the audit record of this {self.tool} call could not be written ({_short(audit_exc)})"
+        self.written = True
+        if warning:
+            self.warnings.append(warning)
+            if isinstance(exc, VissimMcpError) and warning not in exc.warnings:
+                exc.warnings.append(warning)
+        return False  # never swallow the exception

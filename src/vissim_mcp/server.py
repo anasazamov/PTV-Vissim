@@ -31,7 +31,7 @@ from . import __version__
 from .config import Settings
 from .logging_setup import flush_logging
 from .service import VissimService
-from .tools import lifecycle
+from .tools import files, lifecycle, objects
 
 log = logging.getLogger(__name__)
 
@@ -39,11 +39,15 @@ SERVER_NAME = "vissim"
 INSTRUCTIONS = (
     "Controls PTV Vissim (traffic simulation) through COM on this Windows PC. "
     "Start every session with vissim_health; if Vissim is not connected, call vissim_connect. "
+    "Files must be inside the allowed directories shown by vissim_health; originals in read-only folders are "
+    "loaded and saved under a new name. Find exact object and attribute names with vissim_describe. "
     "Before changing attributes run the tool with dry_run=true, show old/new values and get approval. "
     "Nothing is saved automatically: save explicitly with vissim_save_network (to a new file name). "
     "Simulations run as background jobs: vissim_start_simulation returns at once, then poll with "
     "vissim_wait_simulation. Call vissim_close at the end of the work to free the license seat."
 )
+#: Tool modules in registration order (= the order of tools/list).
+TOOL_MODULES = (lifecycle, files, objects)
 #: Hard upper bound for the exit sequence (Claude Code kills the process tree 300 ms after closing stdin).
 EXIT_WATCHDOG_S = 0.25
 
@@ -54,7 +58,8 @@ def build_server(service: VissimService, settings: Settings) -> FastMCP:
     """Create the FastMCP application and register all tool modules."""
     mcp = FastMCP(name=SERVER_NAME, instructions=INSTRUCTIONS, log_level="WARNING")
     mcp._mcp_server.version = __version__  # serverInfo.version (FastMCP would report the SDK version)
-    lifecycle.register(mcp, service)
+    for module in TOOL_MODULES:
+        module.register(mcp, service)
     return mcp
 
 

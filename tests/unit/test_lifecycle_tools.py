@@ -48,8 +48,9 @@ def setup(harness: Callable[..., Harness]) -> tuple[Harness, FastMCP]:
 
 async def test_the_lifecycle_tools_are_registered(setup: tuple[Harness, FastMCP]) -> None:
     _h, mcp = setup
-    tools = {tool.name: tool for tool in await mcp.list_tools()}
-    assert list(tools) == LIFECYCLE_TOOLS
+    listed = await mcp.list_tools()
+    assert [tool.name for tool in listed[: len(LIFECYCLE_TOOLS)]] == LIFECYCLE_TOOLS  # registered first
+    tools = {tool.name: tool for tool in listed if tool.name in LIFECYCLE_TOOLS}
     expected = {  # name: (readOnlyHint, destructiveHint)
         "vissim_connect": (False, False),
         "vissim_health": (True, False),

@@ -6,7 +6,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from ..errors import ErrorCode, VissimMcpError, from_com_error, is_com_error, is_connection_error
+from ..errors import ErrorCode, VissimMcpError, describe_exception, is_connection_error
 from ..service import VissimService
 from ..worker import WorkerContext
 from ._common import register_tool
@@ -28,6 +28,25 @@ INFO_SIMULATION_ATTRIBUTES = ("SimPeriod", "SimRes")
 _MAX_ERROR_CHARS = 200
 
 
+def collection_counts(vissim: Any, errors: dict[str, str]) -> dict[str, Any]:
+    """``Count`` of every collection in :data:`INFO_COLLECTIONS`, each read on its own (worker thread).
+
+    A count that cannot be read becomes null and is explained in ``errors``; a lost connection (also a call
+    that failed in transit) is raised.
+    """
+    counts: dict[str, Any] = {}
+    net = vissim.Net
+    for name in INFO_COLLECTIONS:
+        try:
+            counts[name] = getattr(net, name).Count
+        except Exception as exc:
+            if is_connection_error(exc):
+                raise
+            counts[name] = None
+            errors[name] = describe_exception(exc, _MAX_ERROR_CHARS)
+    return counts
+
+
 def read_info(ctx: WorkerContext) -> dict[str, Any]:
     """COM task of vissim_info: collection counts and simulation attributes, each read on its own.
 
@@ -38,17 +57,7 @@ def read_info(ctx: WorkerContext) -> dict[str, Any]:
     if vissim is None:
         raise VissimMcpError(ErrorCode.NOT_CONNECTED, "Vissim is not connected")
     errors: dict[str, str] = {}
-    counts: dict[str, Any] = {}
-    net = vissim.Net
-    for name in INFO_COLLECTIONS:
-        try:
-            counts[name] = getattr(net, name).Count
-        except Exception as exc:
-            if is_connection_error(exc):
-                raise
-            counts[name] = None
-            errors[name] = _describe(exc)
-    result: dict[str, Any] = {"counts": counts}
+    result: dict[str, Any] = {"counts": collection_counts(vissim, errors)}
     simulation = vissim.Simulation
     for attribute in INFO_SIMULATION_ATTRIBUTES:
         try:
@@ -57,21 +66,10 @@ def read_info(ctx: WorkerContext) -> dict[str, Any]:
             if is_connection_error(exc):
                 raise
             result[attribute] = None
-            errors[f"Simulation.{attribute}"] = _describe(exc)
+            errors[f"Simulation.{attribute}"] = describe_exception(exc, _MAX_ERROR_CHARS)
     if errors:
         result["errors"] = errors
     return result
-
-
-def _describe(exc: BaseException) -> str:
-    if isinstance(exc, VissimMcpError):
-        text = exc.message
-    elif is_com_error(exc):
-        text = from_com_error(exc).message
-    else:
-        text = f"{type(exc).__name__}: {exc}"
-    text = " ".join(text.split())
-    return text if len(text) <= _MAX_ERROR_CHARS else text[: _MAX_ERROR_CHARS - 3] + "..."
 
 
 def register(mcp: FastMCP, service: VissimService) -> None:
@@ -115,8 +113,9 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         """Summarise the model in Vissim: object counts of the main network collections and simulation
         settings.
 
-        Returns: loaded_file (the network loaded through this server, null otherwise), pid, progid, counts
-        ({Links, Nodes, SignalControllers, SignalHeads, VehicleInputs, VehicleRoutingDecisionsStatic,
+        Returns: loaded_file (the network loaded through this server, null otherwise), saved_file (the last
+        file written by vissim_save_network, null otherwise), pid, progid, counts ({Links, Nodes,
+        SignalControllers, SignalHeads, VehicleInputs, VehicleRoutingDecisionsStatic,
         DataCollectionMeasurements, VehicleTravelTimeMeasurements, QueueCounters} -> number; null when a count
         could not be read), SimPeriod and SimRes, and errors (only when some value could not be read).
         Reads a few values through COM, normally in well under a second.
@@ -125,7 +124,13 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         No parameters. Example: vissim_info()
         """
         data = await service.call(read_info, task_name="vissim_info")
-        return {"loaded_file": service.loaded_file, "pid": service.pid, "progid": service.progid, **data}
+        return {
+            "loaded_file": service.loaded_file,
+            "saved_file": service.saved_file,
+            "pid": service.pid,
+            "progid": service.progid,
+            **data,
+        }
 
     async def vissim_restart() -> dict[str, Any]:
         """Replace Vissim with a fresh instance: kill the current one, then start and connect a new one.

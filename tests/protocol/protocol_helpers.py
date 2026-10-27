@@ -16,6 +16,16 @@ from vissim_mcp import __version__  # noqa: E402
 #: Claude Code (Windows) closes stdin and kills the process tree 300 ms later (PLAN 3.3).
 EXIT_BUDGET_S = 0.300
 LIFECYCLE_TOOLS = ["vissim_connect", "vissim_health", "vissim_info", "vissim_restart", "vissim_close"]
+FILE_TOOLS = ["vissim_load_network", "vissim_save_network"]
+OBJECT_TOOLS = [
+    "vissim_describe",
+    "vissim_list_objects",
+    "vissim_get_attributes",
+    "vissim_set_attributes",
+    "vissim_set_attribute_bulk",
+]
+#: Every registered tool in tools/list order (M3: life cycle, files, objects).
+ALL_TOOLS = [*LIFECYCLE_TOOLS, *FILE_TOOLS, *OBJECT_TOOLS]
 
 
 def handshake(server: StdioServer) -> dict[str, dict[str, Any]]:

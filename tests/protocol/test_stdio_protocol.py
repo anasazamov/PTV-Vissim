@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from noise import NOISE_LABELS
-from protocol_helpers import LIFECYCLE_TOOLS, finish, handshake
+from protocol_helpers import ALL_TOOLS, finish, handshake
 
 from stdio_client import StdioServer
 from vissim_mcp import __version__
@@ -31,7 +31,7 @@ def test_initialize_tools_list_health_and_fast_exit(
 ) -> None:
     server = start_server()
     tools = handshake(server)
-    assert list(tools) == LIFECYCLE_TOOLS
+    assert list(tools) == ALL_TOOLS
     health_tool = tools["vissim_health"]
     assert health_tool["annotations"]["readOnlyHint"] is True
     assert health_tool["inputSchema"]["type"] == "object"
@@ -59,7 +59,7 @@ def test_deliberate_noise_never_reaches_stdout(start_server: StartServer) -> Non
         env={"NOISY_LAUNCHER_FAKE_COM": "1", "FAKE_VISSIM_PRINT_STDOUT": "1"},
     )
     tools = handshake(server)
-    assert list(tools) == LIFECYCLE_TOOLS
+    assert list(tools) == ALL_TOOLS
     assert server.call_tool("vissim_health")["payload"]["ok"] is True
     finish(server)
 
@@ -79,7 +79,7 @@ def test_garbage_input_does_not_break_the_session(start_server: StartServer) -> 
     server.send_raw(b"this is not json\n")
     server.send_raw(b'{"jsonrpc": "2.0", "id": 99, "method": "no/such/method"}\n')
     tools = server.request("tools/list")["result"]["tools"]
-    assert [tool["name"] for tool in tools] == LIFECYCLE_TOOLS
+    assert [tool["name"] for tool in tools] == ALL_TOOLS
     assert server.call_tool("vissim_health")["payload"]["ok"] is True
     finish(server)
 

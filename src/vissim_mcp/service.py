@@ -21,6 +21,12 @@ Simulation jobs (M4) plug in through ``self.jobs`` (a registry with a ``current`
 :class:`JobRegistryHook`): the worker's background step ticks the current job when it is ``running`` and
 belongs to the worker's generation; ``restart``/``close`` abort it. A ``tick`` that raises fails its job once
 instead of being retried every poll.
+
+Files and audit (M3): ``self.policy`` (:class:`~vissim_mcp.policy.PathPolicy`) checks every path,
+``self.audit`` (:class:`~vissim_mcp.audit.AuditLog`, by default in ``VISSIM_AUDIT_DIR``) receives one record
+per write operation through :meth:`VissimService.write_audit`. ``loaded_file`` / ``saved_file`` track the
+network files of the current connection; every file loaded in it is protected against an accidental overwrite
+(:meth:`VissimService.is_loaded_file`, ``vissim_save_network(overwrite_loaded=...)``).
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import os
 import platform
 import struct
 import threading
@@ -40,6 +47,7 @@ from importlib import metadata
 from typing import Any, Protocol
 
 from . import __version__, winproc
+from .audit import AuditLog
 from .config import Settings, is_valid_progid
 from .errors import (
     CO_E_SERVER_EXEC_FAILURE,
@@ -54,6 +62,7 @@ from .errors import (
     is_disconnect_error,
 )
 from .logging_setup import flush_logging
+from .policy import PathPolicy
 from .worker import ComWorker, WorkerContext
 
 log = logging.getLogger(__name__)
@@ -76,6 +85,8 @@ _EXIT_NOT_RUN = "not_run"  # Exit() was never executed
 _EXIT_DELIVERED = frozenset({_EXIT_RETURNED, _EXIT_GONE, _EXIT_FAILED})
 _JOB_SUMMARY_KEYS = ("job_id", "state", "run", "runs", "simsec", "percent")
 _ACTIVE_JOB_STATES = ("running", "paused")
+#: The core fields every audit record carries (PLAN 6.8), in this order, null when not applicable.
+AUDIT_CORE_FIELDS = ("args", "dry_run", "ok", "error_code", "old", "new")
 _LICENSE_HINT = HRESULT_HINTS[CO_E_SERVER_EXEC_FAILURE]
 _STARTUP_TIMEOUT_HINT = (
     "Vissim probably shows a dialog (license selection, 'License not found', a crash report). Check the "
@@ -140,6 +151,11 @@ def _package_version(name: str) -> str | None:
 
 def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _normalized(path: str | os.PathLike[str]) -> str:
+    """Comparable spelling of an (already resolved) path: case-folded on Windows, normalised separators."""
+    return os.path.normcase(os.path.normpath(os.fspath(path)))
 
 
 def _short(exc: BaseException, limit: int = 300) -> str:
@@ -225,7 +241,9 @@ class VissimService:
             backend_factory = RealComBackend
         self.settings = settings
         self.backend_factory = backend_factory
-        self.audit = audit
+        # Writes are always audited (PLAN 0.4): without an explicit audit log, VISSIM_AUDIT_DIR is used.
+        self.audit: Any = audit if audit is not None else AuditLog(settings.audit_dir)
+        self.policy = PathPolicy.from_settings(settings)
         self.procs: Any = procs if procs is not None else winproc
 
         # Connection state: written by connect/restart/close (event loop thread), read without COM by
@@ -237,7 +255,9 @@ class VissimService:
         self.progid: str | None = None
         self.generation = 0
         self.job_object_active = False
-        self.loaded_file: str | None = None
+        self.loaded_file: str | None = None  # the network loaded by vissim_load_network (not additive)
+        self.saved_file: str | None = None  # the last file written by vissim_save_network
+        self._loaded_paths: set[str] = set()  # every file loaded in this connection (normcase)
         self.connect_warnings: list[str] = []
         self.shutting_down = False
         self.last_error: dict[str, Any] | None = None
@@ -281,6 +301,7 @@ class VissimService:
             "queue_depth": int(getattr(worker, "queue_depth", 0) or 0) if worker is not None else 0,
             "job": self._job_summary(),
             "loaded_file": self.loaded_file,
+            "saved_file": self.saved_file,
             "job_object": self.job_object_active,
             "shutting_down": self.shutting_down,
             "settings": self.settings.public_dict(),
@@ -453,6 +474,86 @@ class VissimService:
             record["task"] = task
         self.last_error = record
 
+    # --- files, audit and the job guard (M3)
+
+    def ensure_connected(self) -> None:
+        """Raise what ``call`` would raise before any COM work (``SHUTTING_DOWN``, ``NOT_CONNECTED``) - so a
+        tool reports a missing connection before it checks its arguments against the file system."""
+        self._check_not_shutting_down()
+        if not self.connected or self.worker is None:
+            raise self._not_connected_error()
+
+    def active_job(self) -> Any | None:
+        """The simulation job that is ``running`` or ``paused``, or None (no registry, no job, or finished).
+
+        Uses the registry's ``active()`` when it has one (M4), else its ``current`` job. Never raises.
+        """
+        registry = self.jobs
+        if registry is None:
+            return None
+        try:
+            active = getattr(registry, "active", None)
+            if callable(active):
+                found = active()
+                job = (
+                    getattr(registry, "current", None)
+                    if found is True
+                    else (None if found is False else found)
+                )
+            else:
+                job = getattr(registry, "current", None)
+            if job is None:
+                return None
+            state = getattr(job, "state", None)
+            return job if str(getattr(state, "value", state)) in _ACTIVE_JOB_STATES else None
+        except Exception:
+            log.debug("reading the active simulation job failed", exc_info=True)
+            return None
+
+    def remember_loaded(self, path: str, *, additive: bool) -> None:
+        """Record a loaded network file: it becomes ``loaded_file`` (unless loaded additively into an existing
+        network) and is protected against an accidental overwrite for the rest of this connection."""
+        self._loaded_paths.add(_normalized(path))
+        if not additive or self.loaded_file is None:
+            self.loaded_file = path
+
+    def note_load_failed(self, path: str, *, additive: bool) -> None:
+        """A load failed or hung: which network Vissim holds now is unknown (a replacing load may have
+        unloaded the previous one), so ``loaded_file`` is cleared - and the file is protected all the same."""
+        self._loaded_paths.add(_normalized(path))
+        if not additive:
+            self.loaded_file = None
+
+    def is_loaded_file(self, path: str | os.PathLike[str]) -> bool:
+        """True when ``path`` is (the same file as) a network loaded in this connection."""
+        candidate = os.fspath(path)
+        if _normalized(candidate) in self._loaded_paths:
+            return True
+        for loaded in self._loaded_paths:
+            try:
+                if os.path.samefile(candidate, loaded):
+                    return True
+            except (OSError, ValueError):
+                continue
+        return False
+
+    def write_audit(self, tool: str, fields: Mapping[str, Any]) -> str | None:
+        """Write one audit record (PLAN 6.8): ``tool``, ``generation``, ``pid``, the core fields of
+        :data:`AUDIT_CORE_FIELDS` (null when not applicable) and the tool's extra fields. Returns None, or a
+        warning text for the tool result when the record could not be written. Never raises."""
+        record: dict[str, Any] = {"tool": tool, "generation": self.generation, "pid": self.pid}
+        for name in AUDIT_CORE_FIELDS:
+            record[name] = fields.get(name)
+        record.update({name: value for name, value in fields.items() if name not in record})
+        audit = self.audit
+        if audit is None:
+            return "audit logging is disabled for this server; this operation was not recorded"
+        try:
+            return audit.write(record)
+        except Exception as exc:
+            log.warning("audit record of %s could not be written: %s", tool, exc)
+            return f"the audit record of this operation could not be written ({type(exc).__name__}: {exc})"
+
     # --- connect
 
     async def connect(self, progid: str | None = None) -> dict[str, Any]:
@@ -537,7 +638,7 @@ class VissimService:
         self._startup_candidate = None
         self._cleanup_killed_pid = None
         self._job_attempts.clear()
-        self.loaded_file = None
+        self._forget_files()
         self.connect_warnings = []
         started = time.monotonic()
         log.info("connecting to Vissim (ProgID %s, generation %d)", chosen, generation)
@@ -1064,8 +1165,13 @@ class VissimService:
         self.pid_create_time = None
         self.progid = None
         self.job_object_active = False
-        self.loaded_file = None
+        self._forget_files()
         self.connect_warnings = []
+
+    def _forget_files(self) -> None:
+        self.loaded_file = None
+        self.saved_file = None
+        self._loaded_paths = set()
 
     def _kill_process(self, pid: int, create_time: float | None, why: str) -> bool:
         try:
