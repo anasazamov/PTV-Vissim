@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "vissim": {
+      "type": "stdio",
+      "command": "C:\\Users\\UltraPC\\AppData\\Local\\vissim-mcp\\venv\\Scripts\\python.exe",
+      "args": ["-X", "utf8", "-m", "vissim_mcp"],
+      "env": {
+        "PYTHONUTF8": "1",
+        "VISSIM_PROGID": "Vissim.Vissim",
+        "VISSIM_ALLOWED_DIRS": "D:\\VissimProjects",
+        "VISSIM_KILL_ON_EXIT": "1"
+      },
+      "timeout": 900000
+    }
+  }
+}

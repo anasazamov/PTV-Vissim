@@ -1,0 +1,15 @@
+# Vissim loyihasi qoidalari
+
+- Vissim bilan faqat `vissim` MCP toollari orqali ishla; Python COM skriptini o'zing yozib ishga tushirma.
+- Ishni `vissim_health` bilan boshla; ulanmagan bo'lsa `vissim_connect`.
+- Asl modellar `D:\VissimProjects\models\original\` da — faqat o'qiladi. Ishni nusxa ustida qil va
+  `vissim_save_network` bilan yangi nomga saqla (masalan `D:\VissimProjects\work\`).
+- Har qanday yozishdan oldin `dry_run=true` bilan eski/yangi qiymatlarni ko'rsat va tasdiq ol.
+- Atribut nomini taxmin qilma: `vissim_describe` yoki `vissim_get_attributes` bilan tekshir; noaniq bo'lsa COM Help'dagi
+  nomni so'ra.
+- Simulyatsiya: `vissim_configure_simulation` → `vissim_start_simulation` → `vissim_wait_simulation` (takror) → natijalar.
+- Bir nechta run uchun har doim `seed` ber.
+- 200 qatordan ko'p natija — `vissim_export_csv`.
+- Signal holatini faqat `pause_at` bilan pauza qilingan simulyatsiyada o'zgartir; oxirida `release_to_controller=true`.
+- `TIMEOUT_HUNG` bo'lsa — Vissim oynasida modal dialog bo'lishi mumkin: foydalanuvchiga ayt, keyin `vissim_restart`.
+- Ish oxirida `vissim_close` (litsenziya seat'ini bo'shatish).

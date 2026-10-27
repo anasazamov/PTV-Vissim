@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__vissim__vissim_health",
+      "mcp__vissim__vissim_info",
+      "mcp__vissim__vissim_describe",
+      "mcp__vissim__vissim_list_objects",
+      "mcp__vissim__vissim_get_attributes",
+      "mcp__vissim__vissim_simulation_status",
+      "mcp__vissim__vissim_wait_simulation",
+      "mcp__vissim__vissim_tail_log"
+    ],
+    "deny": [
+      "mcp__vissim__vissim_exec_python"
+    ]
+  }
+}
