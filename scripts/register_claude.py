@@ -5,13 +5,18 @@ Python 3.11+ can run it (the installer runs it with the runtime venv's interpret
 
 Modes (default: register):
 
-* register - build the server JSON, remove an existing entry of the same name *in the same scope* (a "not
-  found" answer is ignored), ``claude mcp add-json <name> <json> -s <scope>``, then verify with
-  ``claude mcp get <name>`` that the entry points at the runtime ``python.exe``.
+* register - build the server JSON, refuse if the name exists in another scope (also as seen from every
+  ``--allowed-dirs`` root, where a ``.mcp.json`` or a local entry of that folder takes precedence), remove an
+  existing entry of the same name *in the same scope* (a "not found" answer is ignored),
+  ``claude mcp add-json <name> <json> -s <scope>`` (if that fails, the removed entry is added back), then
+  verify with ``claude mcp get <name>`` that the entry points at the runtime ``python.exe``.
 * ``--print-json`` - print the server JSON (exactly what would be registered) and exit; claude is not needed.
 * ``--unregister`` - remove the entry from the given scope (not found = success).
 * ``--show`` - print what ``claude mcp get <name>`` reports, parsed into JSON (``found``, ``scope``,
-  ``command``, ``args``, ``env``, ``status``).
+  ``command``, ``args``, ``env``, ``status``). With ``--project-dir`` the command runs in that folder, so the
+  answer is the entry Claude Code uses there (local > project > user).
+* ``--current-settings`` - the installer parameters of the existing entry in ``--scope`` (runtime folder,
+  allowed dirs, ProgID, extra variables) as JSON, so that a rerun of install.ps1 keeps them.
 * ``--dry-run`` - print the claude commands instead of running them (no claude process is started).
 
 claude is always started with an argument list (never through a shell). ``user`` scope commands run in the
@@ -41,7 +46,9 @@ DEFAULT_SCOPE = "user"
 DEFAULT_PROGID = "Vissim.Vissim"
 DEFAULT_TIMEOUT_MS = 900_000
 SCOPES = ("user", "project", "local")
-SERVER_ARGS = ["-X", "utf8", "-m", "vissim_mcp"]
+#: ``-P``: do not put the working directory (the folder Claude Code was opened in) on sys.path, so a
+#: ``csv.py`` or an ``mcp`` folder there cannot shadow the server's imports (Python 3.11+).
+SERVER_ARGS = ["-X", "utf8", "-P", "-m", "vissim_mcp"]
 CLAUDE_TIMEOUT_S = 180.0
 
 EXIT_OK = 0
@@ -194,6 +201,12 @@ class Claude:
         self.dry_run = dry_run
         self.verbose = verbose
 
+    def with_cwd(self, cwd: Path) -> Claude:
+        """The same claude, run in another folder (it sees that folder's local/project entries)."""
+        other = Claude.__new__(Claude)
+        other.prefix, other.cwd, other.dry_run, other.verbose = self.prefix, cwd, self.dry_run, self.verbose
+        return other
+
     def run(self, *args: str) -> ClaudeResult:
         argv = [*self.prefix, *args]
         if self.dry_run:
@@ -305,28 +318,117 @@ def remove(claude: Claude, name: str, scope: str) -> bool:
     )
 
 
+def allowed_roots(config: dict[str, Any]) -> list[Path]:
+    """The existing folders of ``VISSIM_ALLOWED_DIRS`` (where the owner opens Claude Code)."""
+    roots: list[Path] = []
+    for part in str(config.get("env", {}).get("VISSIM_ALLOWED_DIRS", "")).split(";"):
+        part = part.strip()
+        if part and Path(part).is_dir() and not any(same_path(part, root) for root in roots):
+            roots.append(Path(part))
+    return roots
+
+
+def mcp_json_has(folder: Path, name: str) -> bool:
+    """True if ``<folder>\\.mcp.json`` defines ``name`` (a project-scope entry; unreadable = False)."""
+    try:
+        data = json.loads((folder / ".mcp.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return False
+    servers = data.get("mcpServers") if isinstance(data, dict) else None
+    return isinstance(servers, dict) and name in servers
+
+
+def find_conflict(
+    claude: Claude,
+    name: str,
+    scope: str,
+    folders: Sequence[Path] = (),
+    current: RegisteredServer | None = None,
+) -> tuple[RegisteredServer, Path] | None:
+    """An entry of ``name`` in a scope other than ``scope`` that Claude Code would use instead, and where.
+
+    Looks from ``claude.cwd`` and, for the user scope, also from every folder in ``folders``: a ``.mcp.json``
+    or a local entry of such a folder is invisible from the home directory but wins there (local > project >
+    user). ``current`` is the ``claude mcp get`` answer already obtained in ``claude.cwd``.
+    """
+    views: list[Path] = [claude.cwd]
+    if scope == "user":
+        views += [folder for folder in folders if not any(same_path(folder, view) for view in views)]
+    for folder in views:
+        if folder is claude.cwd and current is not None:
+            entry = current
+        else:
+            entry = claude.with_cwd(folder).get(name)
+        if entry.found and entry.scope in SCOPES and entry.scope != scope:
+            return entry, folder
+        if scope != "project" and mcp_json_has(folder, name):
+            return RegisteredServer(found=True, scope="project", raw=str(folder / ".mcp.json")), folder
+    return None
+
+
+def _restorable(entry: RegisteredServer | None, scope: str) -> dict[str, Any] | None:
+    """A server JSON rebuilt from ``claude mcp get`` output, to re-add a removed entry (None if unusable)."""
+    if entry is None or not entry.found or entry.scope != scope or not entry.command:
+        return None
+    if (entry.type or "stdio").strip().lower() != "stdio":
+        return None
+    return {
+        "type": "stdio",
+        "command": entry.command.strip().strip('"'),
+        "args": (entry.args or "").split(),
+        "env": dict(entry.env),
+    }
+
+
 def register(
-    claude: Claude, name: str, scope: str, config: dict[str, Any], *, allow_other_scope: bool = False
+    claude: Claude,
+    name: str,
+    scope: str,
+    config: dict[str, Any],
+    *,
+    allow_other_scope: bool = False,
+    folders: Sequence[Path] = (),
 ) -> RegisteredServer | None:
-    """Remove + add-json + verify. Returns the verified entry (None in a dry run)."""
+    """Conflict check + remove + add-json + verify. Returns the verified entry (None in a dry run).
+
+    If ``add-json`` fails after the previous entry of the same scope was removed, that entry is added back
+    (rebuilt from ``claude mcp get``), so a failed refresh does not leave the server unregistered.
+    """
+    previous: RegisteredServer | None = None
     if not claude.dry_run:
-        existing = claude.get(name)
-        if existing.found and existing.scope in SCOPES and existing.scope != scope and not allow_other_scope:
+        previous = claude.get(name)
+        conflict = None if allow_other_scope else find_conflict(claude, name, scope, folders, previous)
+        if conflict is not None:
+            existing, folder = conflict
+            here = same_path(folder, claude.cwd)
+            where = "" if here else f" (as seen from {folder})"
+            cd = "" if here else f'cd "{folder}"; '
             raise RegistrationError(
-                f"'{name}' is already registered in the {existing.scope} scope "
-                f"(command: {existing.command}). "
+                f"'{name}' is already registered in the {existing.scope} scope{where} "
+                f"(command: {existing.command or existing.raw}). "
                 f"Claude Code would use that entry instead of the new {scope}-scope one (precedence local > "
                 f"project > user; never register one name in two scopes). Remove it first: "
-                f"claude mcp remove {name} -s {existing.scope}",
+                f"{cd}claude mcp remove {name} -s {existing.scope}",
                 EXIT_CONFLICT,
             )
-    if remove(claude, name, scope):
+    removed = remove(claude, name, scope)
+    if removed:
         _say(f"removed the previous '{name}' entry ({scope} scope)")
     result = claude.run("mcp", "add-json", name, server_json(config), "-s", scope)
     if result.returncode != 0:
-        raise RegistrationError(
+        message = (
             f"'claude mcp add-json {name} ... -s {scope}' failed (exit {result.returncode}): {result.text}"
         )
+        restore = _restorable(previous, scope) if removed else None
+        if restore is not None:
+            back = claude.run("mcp", "add-json", name, server_json(restore), "-s", scope)
+            if back.returncode == 0:
+                message += f"; the previous '{name}' entry was restored ({restore['command']})"
+            else:
+                message += f"; restoring the previous entry also failed: {back.text or back.returncode}"
+        elif removed:
+            message += f"; the previous '{name}' entry was removed and could not be restored"
+        raise RegistrationError(message)
     if claude.dry_run:
         claude.run("mcp", "get", name)
         return None
@@ -353,6 +455,31 @@ def verify(claude: Claude, name: str, scope: str, config: dict[str, Any]) -> Reg
     if problems:
         raise RegistrationError("verification failed: " + "; ".join(problems), EXIT_VERIFY_FAILED)
     return entry
+
+
+def current_settings(entry: RegisteredServer, scope: str) -> dict[str, Any]:
+    """The install.ps1 parameters behind an existing entry (``found`` false if it is not in ``scope``)."""
+    if not entry.found or entry.scope != scope:
+        return {"found": False, "scope": entry.scope if entry.found else None}
+    command = (entry.command or "").strip().strip('"')
+    runtime_dir = None
+    pure = PureWindowsPath(command)
+    if command and pure.name.lower() == "python.exe" and pure.parent.name.lower() == "scripts":
+        runtime_dir = str(pure.parent.parent)
+    extra = [
+        f"{key}={value}"
+        for key, value in entry.env.items()
+        if key.upper() not in _RESERVED_ENV or (key.upper() == "VISSIM_KILL_ON_EXIT" and value != "1")
+    ]
+    return {
+        "found": True,
+        "scope": entry.scope,
+        "command": command or None,
+        "runtime_dir": runtime_dir,
+        "allowed_dirs": entry.env.get("VISSIM_ALLOWED_DIRS") or None,
+        "progid": entry.env.get("VISSIM_PROGID") or None,
+        "extra_env": extra,
+    }
 
 
 # --- command line
@@ -394,6 +521,11 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--print-json", action="store_true", help="print the server JSON and exit")
     mode.add_argument("--unregister", action="store_true", help="remove the entry from --scope")
     mode.add_argument("--show", action="store_true", help="print 'claude mcp get' parsed as JSON")
+    mode.add_argument(
+        "--current-settings",
+        action="store_true",
+        help="print the installer parameters of the existing entry in --scope as JSON",
+    )
     parser.add_argument("--dry-run", action="store_true", help="print the claude commands, run nothing")
     return parser
 
@@ -410,7 +542,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _main(args: argparse.Namespace) -> int:
     if args.timeout_ms < 1000:
         raise RegistrationError("--timeout-ms must be at least 1000 (Claude Code ignores smaller values)", 2)
-    needs_python = not (args.unregister or args.show)
+    needs_python = not (args.unregister or args.show or args.current_settings)
     config: dict[str, Any] | None = None
     if needs_python:
         if not args.python:
@@ -442,7 +574,11 @@ def _main(args: argparse.Namespace) -> int:
         else:
             where = args.claude or "PATH or %USERPROFILE%\\.local\\bin\\claude.exe"
             raise RegistrationError(f"claude was not found ({where}); install Claude Code first")
-    if args.scope == "user":
+    if args.show and args.project_dir:
+        cwd = Path(args.project_dir)
+        if not cwd.is_dir():
+            raise RegistrationError(f"--project-dir does not exist: {cwd}", EXIT_USAGE)
+    elif args.scope == "user":
         cwd = Path.home()
     else:
         cwd = Path(args.project_dir) if args.project_dir else Path.cwd()
@@ -453,6 +589,10 @@ def _main(args: argparse.Namespace) -> int:
     if args.show:
         entry = claude.get(args.name)
         sys.stdout.write(json.dumps(entry.to_dict(), ensure_ascii=False, indent=2) + "\n")
+        return EXIT_OK
+    if args.current_settings:
+        settings = current_settings(claude.get(args.name), args.scope)
+        sys.stdout.write(json.dumps(settings, ensure_ascii=False, indent=2) + "\n")
         return EXIT_OK
     if args.unregister:
         removed = remove(claude, args.name, args.scope)
@@ -466,7 +606,14 @@ def _main(args: argparse.Namespace) -> int:
     assert config is not None
     _say(f"claude: {claude_path}")
     _say(f"registering '{args.name}' ({args.scope} scope): {config['command']} {' '.join(config['args'])}")
-    entry = register(claude, args.name, args.scope, config, allow_other_scope=args.allow_other_scope)
+    entry = register(
+        claude,
+        args.name,
+        args.scope,
+        config,
+        allow_other_scope=args.allow_other_scope,
+        folders=allowed_roots(config),
+    )
     if entry is not None:
         _say(f"verified: scope {entry.scope}, status {entry.status}, command {entry.command}")
     return EXIT_OK

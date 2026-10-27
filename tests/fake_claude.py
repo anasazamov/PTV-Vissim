@@ -1,11 +1,20 @@
 """A stand-in for ``claude.exe`` (``claude mcp get/add-json/remove``) used by the registration tests.
 
-State lives in the JSON file named by ``FAKE_CLAUDE_STATE`` (``{"user": {...}, "project": {...}, "local":
-{...}}``); every invocation (argv and cwd) is appended to the JSON-lines file ``FAKE_CLAUDE_LOG``.
+Scopes behave like Claude Code's and depend on the working directory:
+
+* ``user`` entries live in the JSON file named by ``FAKE_CLAUDE_STATE`` (``{"user": {...}, "local": {...}}``)
+  and are visible from every folder;
+* ``local`` entries are kept per folder in the same file (``"local": {"<normalised cwd>": {...}}``) and are
+  visible only from that folder;
+* ``project`` entries are the ``.mcp.json`` file of the working directory.
+
+``get`` reports the entry with the highest precedence (local > project > user) seen from the working
+directory. Every invocation (argv and cwd) is appended to the JSON-lines file ``FAKE_CLAUDE_LOG``.
 ``FAKE_CLAUDE_STATUS`` sets the health status shown by ``get`` (default ``✓ Connected``);
-``FAKE_CLAUDE_FAIL`` = ``add-json`` / ``remove`` / ``get`` makes that sub-command fail.
-The output imitates Claude Code 2.1: ``get`` prints ``Scope:``, ``Status:``, ``Type:``, ``Command:``,
-``Args:`` and an ``Environment:`` block; unknown names print ``No MCP server named "<name>"`` (exit 1).
+``FAKE_CLAUDE_FAIL`` = ``add-json`` / ``remove`` / ``get`` makes that sub-command fail every time,
+``FAKE_CLAUDE_FAIL_ONCE`` only the first time. The output imitates Claude Code 2.1: ``get`` prints ``Scope:``,
+``Status:``, ``Type:``, ``Command:``, ``Args:`` and an ``Environment:`` block; unknown names print
+``No MCP server named "<name>"`` (exit 1).
 """
 
 from __future__ import annotations
@@ -14,6 +23,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 SCOPES_BY_PRECEDENCE = ("local", "project", "user")
 SCOPE_TEXT = {
@@ -23,19 +33,49 @@ SCOPE_TEXT = {
 }
 
 
+def cwd_key(path: str | Path | None = None) -> str:
+    return os.path.normcase(os.path.normpath(str(path or os.getcwd())))
+
+
 def _state_path() -> Path:
     return Path(os.environ["FAKE_CLAUDE_STATE"])
 
 
-def _load() -> dict[str, dict[str, dict]]:
+def _load() -> dict[str, Any]:
     path = _state_path()
+    state: dict[str, Any] = {}
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {scope: {} for scope in SCOPES_BY_PRECEDENCE}
+        state = json.loads(path.read_text(encoding="utf-8"))
+    state.setdefault("user", {})
+    state.setdefault("local", {})
+    return state
 
 
-def _save(state: dict[str, dict[str, dict]]) -> None:
+def _save(state: dict[str, Any]) -> None:
     _state_path().write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def _mcp_json() -> Path:
+    return Path(os.getcwd()) / ".mcp.json"
+
+
+def _project_servers() -> dict[str, Any]:
+    path = _mcp_json()
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8-sig")).get("mcpServers", {})
+
+
+def _save_project(servers: dict[str, Any]) -> None:
+    _mcp_json().write_text(json.dumps({"mcpServers": servers}, indent=2), encoding="utf-8")
+
+
+def _servers(state: dict[str, Any], scope: str) -> dict[str, Any]:
+    if scope == "user":
+        return state["user"]
+    if scope == "local":
+        return state["local"].setdefault(cwd_key(), {})
+    return _project_servers()
 
 
 def _scope_arg(args: list[str], default: str) -> str:
@@ -43,6 +83,17 @@ def _scope_arg(args: list[str], default: str) -> str:
         if flag in args:
             return args[args.index(flag) + 1]
     return default
+
+
+def _should_fail(command: str) -> bool:
+    if os.environ.get("FAKE_CLAUDE_FAIL") == command:
+        return True
+    if os.environ.get("FAKE_CLAUDE_FAIL_ONCE") == command:
+        marker = _state_path().with_name(_state_path().name + f".failed-{command}")
+        if not marker.exists():
+            marker.write_text("1", encoding="utf-8")
+            return True
+    return False
 
 
 def main(argv: list[str]) -> int:
@@ -57,14 +108,14 @@ def main(argv: list[str]) -> int:
         print(f"fake claude: unsupported arguments {argv}", file=sys.stderr)
         return 2
     command, name, rest = argv[1], argv[2], argv[3:]
-    if os.environ.get("FAKE_CLAUDE_FAIL") == command:
+    if _should_fail(command):
         print(f"fake claude: {command} failed on purpose", file=sys.stderr)
         return 1
     state = _load()
 
     if command == "get":
         for scope in SCOPES_BY_PRECEDENCE:
-            entry = state.get(scope, {}).get(name)
+            entry = _servers(state, scope).get(name)
             if entry is None:
                 continue
             status = os.environ.get("FAKE_CLAUDE_STATUS", "✓ Connected")
@@ -87,22 +138,30 @@ def main(argv: list[str]) -> int:
 
     if command == "remove":
         scope = _scope_arg(rest, "local")
-        if name not in state.get(scope, {}):
+        servers = _servers(state, scope)
+        if name not in servers:
             print(f"No {scope}-scoped MCP server found with name: {name}", file=sys.stderr)
             return 1
-        del state[scope][name]
-        _save(state)
+        del servers[name]
+        if scope == "project":
+            _save_project(servers)
+        else:
+            _save(state)
         print(f"Removed MCP server {name} from {scope} config")
         return 0
 
     if command == "add-json":
         payload, scope = rest[0], _scope_arg(rest[1:], "local")
         config = json.loads(payload)
-        if name in state.setdefault(scope, {}):
+        servers = _servers(state, scope)
+        if name in servers:
             print(f"MCP server {name} already exists in {scope} config", file=sys.stderr)
             return 1
-        state[scope][name] = config
-        _save(state)
+        servers[name] = config
+        if scope == "project":
+            _save_project(servers)
+        else:
+            _save(state)
         print(f"Added stdio MCP server {name} to {scope} config")
         return 0
 

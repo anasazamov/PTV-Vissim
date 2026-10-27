@@ -11,6 +11,10 @@ Starts the server exactly as Claude Code would - the ``command``/``args``/``env`
 4. every stdout line is a JSON-RPC message;
 5. after stdin is closed the server exits (Claude Code kills it after 300 ms).
 
+Every server process runs in a working directory that holds decoy ``json.py`` / ``csv.py`` modules (or in
+``--cwd``): Claude Code starts the server in the folder it was opened in, and modules there must not shadow
+the server's imports (the registered arguments contain ``-P``).
+
 Standard library only. Never starts Vissim. Exit code 0 = all checks passed, 1 = a check failed,
 2 = invalid arguments.
 """
@@ -23,6 +27,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Sequence
@@ -30,7 +35,12 @@ from pathlib import Path
 from typing import Any
 
 PROTOCOL_VERSION = "2025-06-18"
-SERVER_ARGS = ["-X", "utf8", "-m", "vissim_mcp"]
+SERVER_ARGS = ["-X", "utf8", "-P", "-m", "vissim_mcp"]
+DECOY_MODULES = ("json", "csv")
+DECOY_MESSAGE = (
+    "vissim-mcp smoke: the module {name} was imported from the working directory {cwd}; "
+    "start the server with python -P (register it again with install.ps1)"
+)
 
 #: The 22 tools of the PLAN 7 catalogue.
 EXPECTED_TOOLS: tuple[str, ...] = (
@@ -112,10 +122,17 @@ def kill_tree(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
+def write_decoys(folder: Path) -> None:
+    """Modules named like the server's imports; importing one of them stops the server with a message."""
+    for name in DECOY_MODULES:
+        message = DECOY_MESSAGE.format(name=name, cwd=str(folder))
+        (folder / f"{name}.py").write_text(f"raise SystemExit({message!r})\n", encoding="utf-8")
+
+
 class Session:
-    def __init__(self, argv: list[str], env: dict[str, str]) -> None:
+    def __init__(self, argv: list[str], env: dict[str, str], cwd: str | None = None) -> None:
         self.process = subprocess.Popen(
-            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, cwd=cwd
         )
         self.lines: list[bytes] = []
         self.stderr_chunks: list[bytes] = []
@@ -182,12 +199,15 @@ class Session:
                 raise SmokeFailure(f"stdout line {number} is not JSON-RPC: {raw[:120]!r}")
 
 
-def run_cli(server: dict[str, Any], env: dict[str, str], flag: str, timeout: float) -> tuple[int, str, str]:
+def run_cli(
+    server: dict[str, Any], env: dict[str, str], flag: str, timeout: float, cwd: str | None = None
+) -> tuple[int, str, str]:
     argv = [server["command"], *server["args"], flag]
     try:
         completed = subprocess.run(
             argv,
             env=env,
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
@@ -202,12 +222,21 @@ def run_cli(server: dict[str, Any], env: dict[str, str], flag: str, timeout: flo
     return completed.returncode, out, err
 
 
-def smoke(server: dict[str, Any], *, timeout: float, expected: Sequence[str]) -> dict[str, Any]:
-    """Run all checks; returns a summary dict, raises SmokeFailure on the first failed check."""
-    env = server_environment(server["env"])
-    summary: dict[str, Any] = {"command": server["command"], "args": server["args"]}
+def smoke(
+    server: dict[str, Any], *, timeout: float, expected: Sequence[str], cwd: str | None = None
+) -> dict[str, Any]:
+    """Run all checks; returns a summary dict, raises SmokeFailure on the first failed check.
 
-    code, _out, err = run_cli(server, env, "--check", timeout)
+    Without ``cwd`` the server runs in a temporary folder with decoy modules (see the module docstring).
+    """
+    if cwd is None:
+        with tempfile.TemporaryDirectory(prefix="vissim-mcp-smoke-", ignore_cleanup_errors=True) as folder:
+            write_decoys(Path(folder))
+            return smoke(server, timeout=timeout, expected=expected, cwd=folder)
+    env = server_environment(server["env"])
+    summary: dict[str, Any] = {"command": server["command"], "args": server["args"], "cwd": cwd}
+
+    code, _out, err = run_cli(server, env, "--check", timeout, cwd)
     if code != 0:
         raise SmokeFailure(f"--check failed (exit {code}): {err.strip()[-800:]}")
     try:
@@ -223,13 +252,13 @@ def smoke(server: dict[str, Any], *, timeout: float, expected: Sequence[str]) ->
         line.split("warning:", 1)[1].strip() for line in err.splitlines() if "vissim-mcp: warning:" in line
     ]
 
-    code, out, err = run_cli(server, env, "--version", timeout)
+    code, out, err = run_cli(server, env, "--version", timeout, cwd)
     if code != 0 or not out.startswith("vissim-mcp "):
         raise SmokeFailure(f"--version failed (exit {code}): {out.strip()} {err.strip()[-400:]}")
     version = out.split()[1]
     summary["version"] = version
 
-    session = Session([server["command"], *server["args"]], env)
+    session = Session([server["command"], *server["args"]], env, cwd)
     try:
         started = time.monotonic()
         init = session.request(
@@ -294,6 +323,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--env", action="append", default=[], help="extra KEY=VALUE for the server (repeat)")
     parser.add_argument("--timeout", type=float, default=60.0, help="seconds per step (default %(default)s)")
     parser.add_argument("--json", action="store_true", help="print the summary as JSON to stdout")
+    parser.add_argument(
+        "--cwd", help="working directory of the server (default: a temporary folder with decoy modules)"
+    )
     return parser
 
 
@@ -305,7 +337,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"mcp_smoke: ERROR: {exc}\n")
         return 2
     try:
-        summary = smoke(server, timeout=args.timeout, expected=EXPECTED_TOOLS)
+        summary = smoke(server, timeout=args.timeout, expected=EXPECTED_TOOLS, cwd=args.cwd)
     except SmokeFailure as exc:
         if args.json:
             sys.stdout.write(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False) + "\n")

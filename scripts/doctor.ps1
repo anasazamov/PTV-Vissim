@@ -6,13 +6,17 @@
   Checks, each with PASS / WARN / FAIL / SKIP and a fix hint for every problem:
     1. runtime python      - the runtime venv's python.exe runs and is 64-bit
     2. installed code      - installed vissim-mcp version and code identical to the repository; dependencies import
-    3. claude registration - "claude mcp get vissim": registered, scope, command = runtime python, health status
-    4. configuration       - "python -X utf8 -m vissim_mcp --check" with the registered environment
+    3. claude registration - "claude mcp get vissim" from the home folder AND from the projects folder (the entry
+                             Claude Code uses there: local > project > user): registered, scope (a non-user scope
+                             is WARN, the same name in two scopes is FAIL), command = runtime python, -P in the
+                             arguments, health status
+    4. configuration       - "python -X utf8 -P -m vissim_mcp --check" with the registered environment
     5. MCP smoke           - initialize -> tools/list (22 tools) -> vissim_health over stdio
     6. COM ProgID          - the ProgID/CLSID is registered and its LocalServer32 executable exists
     7. CodeMeter           - the CodeMeter license service is running
     8. Vissim license      - licenses listed by "cmu --list-network" (Demo/Student licenses have no COM module)
-    9. Vissim processes    - leftover COM-launched (-Embedding) Vissim processes that may hold the license seat
+    9. Vissim processes    - COM-launched (-Embedding) Vissim processes that may hold the license seat (the server
+                             only closes the Vissim it started itself; a leftover one is ended in Task Manager)
    10. log directory       - the server log directory is writable (a probe file is created and deleted)
    11. last log lines      - the end of vissim-mcp.log
 
@@ -21,11 +25,14 @@
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
+  powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1 -ProjectsDir E:\Vissim
 #>
 [CmdletBinding()]
 param(
     [string]$RuntimeDir = "",
-    # Used when the server is not registered: the projects folder / ProgID the configuration check assumes.
+    # The folder Claude Code is opened in (default: the first VISSIM_ALLOWED_DIRS root of the registration, else
+    # D:\VissimProjects). The registration is also checked as seen from there. Also the projects folder the
+    # configuration check assumes when the server is not registered.
     [string]$ProjectsDir = "D:\VissimProjects",
     [string]$ProgId = "",
     [string]$Name = "vissim",
@@ -53,7 +60,13 @@ function Add-Row([string]$Check, [string]$Status, [string]$Detail, [string]$Fix 
 
 $oldOutputEncoding = [Console]::OutputEncoding
 try { [Console]::OutputEncoding = $script:Utf8NoBom } catch { }
+# install.ps1 keeps ProjectsDir / ProgId / extra variables of the current registration by itself; the hint only
+# needs what it cannot find without them (a non-default runtime folder, a non-user scope).
 $reinstall = "powershell -ExecutionPolicy Bypass -File " + (Join-Path $PSScriptRoot "install.ps1")
+if (-not (Test-PathInside $RuntimeDir (Get-DefaultRuntimeDir)) -or -not (Test-PathInside (Get-DefaultRuntimeDir) $RuntimeDir)) {
+    $reinstall += (' -RuntimeDir "' + $RuntimeDir + '"')
+}
+$serverArgs = @("-X", "utf8", "-P", "-m", "vissim_mcp")
 Write-Host ("vissim-mcp doctor - runtime " + $RuntimeDir)
 Write-Host ""
 
@@ -119,29 +132,65 @@ if ($NoClaude) {
         } else {
             $pre = @()
             if ($helperPy -like "*py.exe") { $pre = @("-3") }
-            $r = Invoke-Native -FilePath $helperPy -Arguments ($pre + @("-X", "utf8", (Join-Path $PSScriptRoot "register_claude.py"), "--show", "--name", $Name, "--claude", $claudeExe)) -TimeoutSec 300
-            try { $registered = $r.StdOut.Trim() | ConvertFrom-Json } catch { $registered = $null }
-            if (-not $registered) {
+            $showBase = $pre + @("-X", "utf8", (Join-Path $PSScriptRoot "register_claude.py"), "--show", "--name", $Name, "--claude", $claudeExe)
+            # 1) from the home folder: the user-scope entry (what the Desktop app's Code tab prefers)
+            $r = Invoke-Native -FilePath $helperPy -Arguments $showBase -TimeoutSec 300
+            $homeView = $null
+            try { $homeView = $r.StdOut.Trim() | ConvertFrom-Json } catch { $homeView = $null }
+            if (-not $homeView) {
                 Add-Row "claude registration" "FAIL" ("'claude mcp get " + $Name + "' could not be read: " + (Get-Tail $r.StdErr 3)) "run: claude mcp list"
-            } elseif (-not $registered.found) {
-                Add-Row "claude registration" "FAIL" ("'" + $Name + "' is not registered in Claude Code") $reinstall
-                $registered = $null
             } else {
-                $problems = @()
-                $cmdPath = ""
-                if ($registered.command) { $cmdPath = $registered.command.Trim('"') }
-                if (-not $cmdPath -or ((Get-FullPath $cmdPath) -ne (Get-FullPath $rtPy))) {
-                    $problems += ("command is '" + $registered.command + "', not the runtime python")
+                # 2) from the projects folder: the entry Claude Code uses there (local > project > user)
+                $projDir = $ProjectsDir
+                if (-not $PSBoundParameters.ContainsKey("ProjectsDir") -and $homeView.found -and $homeView.env -and
+                    ($homeView.env.PSObject.Properties.Name -contains "VISSIM_ALLOWED_DIRS") -and $homeView.env.VISSIM_ALLOWED_DIRS) {
+                    $projDir = (($homeView.env.VISSIM_ALLOWED_DIRS -split ';') | Where-Object { $_.Trim() } | Select-Object -First 1).Trim()
                 }
-                if ($registered.scope -and $registered.scope -ne "user") {
-                    $problems += ("scope is '" + $registered.scope + "' (user scope is recommended)")
+                $registered = $homeView
+                $viewNote = ""
+                if ($projDir -and (Test-Path -LiteralPath $projDir -PathType Container)) {
+                    $r2 = Invoke-Native -FilePath $helperPy -Arguments ($showBase + @("--project-dir", $projDir)) -TimeoutSec 300
+                    $projView = $null
+                    try { $projView = $r2.StdOut.Trim() | ConvertFrom-Json } catch { $projView = $null }
+                    if ($projView -and $projView.found) { $registered = $projView; $viewNote = " (as seen from " + $projDir + ")" }
                 }
-                $status = "" + $registered.status
-                if ($status -match "(?i)fail|error") { $problems += ("health status: " + $status) }
-                if ($problems.Count -eq 0) {
-                    Add-Row "claude registration" "PASS" ("scope " + $registered.scope + ", status " + $status + ", " + $registered.command)
+                if (-not $registered.found) {
+                    Add-Row "claude registration" "FAIL" ("'" + $Name + "' is not registered in Claude Code (user scope, or project/local scope of " + $projDir + "; another folder: -ProjectsDir <folder>)") $reinstall
+                    $registered = $null
                 } else {
-                    Add-Row "claude registration" "FAIL" ($problems -join "; ") ($reinstall + "  (then /mcp -> " + $Name + " -> Reconnect)")
+                    $problems = @(); $warnings = @()
+                    $scopeNow = "" + $registered.scope
+                    if ($scopeNow -and $scopeNow -ne "user") {
+                        $reinstall += (" -Scope " + $scopeNow + ' -ProjectsDir "' + $projDir + '"')
+                        if ($homeView.found -and $homeView.scope -eq "user") {
+                            $problems += ("'" + $Name + "' is registered twice: user scope and " + $scopeNow + " scope in " + $projDir +
+                                " - the CLI there uses the " + $scopeNow + " entry, the Desktop app's Code tab the user entry")
+                        } else {
+                            $warnings += ("scope is '" + $scopeNow + "'" + $viewNote + " (user scope is recommended: it works in every folder)")
+                        }
+                    }
+                    $cmdPath = ""
+                    if ($registered.command) { $cmdPath = $registered.command.Trim('"') }
+                    if (-not $cmdPath -or ((Get-FullPath $cmdPath) -ne (Get-FullPath $rtPy))) {
+                        $problems += ("command is '" + $registered.command + "', not the runtime python")
+                    }
+                    if (("" + $registered.args) -notmatch '(^|\s)-P(\s|$)') {
+                        $warnings += ("arguments '" + $registered.args + "' lack -P (modules in the opened folder can shadow the server's imports)")
+                    }
+                    $status = "" + $registered.status
+                    if ($status -match "(?i)fail|error") { $problems += ("health status: " + $status) }
+                    $fix = $reinstall + "  (then /mcp -> " + $Name + " -> Reconnect)"
+                    if ($problems.Count -gt 0 -and $homeView.found -and $homeView.scope -eq "user" -and $scopeNow -and $scopeNow -ne "user") {
+                        $fix = 'keep one of them: cd "' + $projDir + '"; claude mcp remove ' + $Name + ' -s ' + $scopeNow + '  (or remove the user entry: scripts\uninstall.ps1)'
+                    }
+                    $detail = "scope " + $scopeNow + $viewNote + ", status " + $status + ", " + $registered.command
+                    if ($problems.Count -gt 0) {
+                        Add-Row "claude registration" "FAIL" (($problems + $warnings) -join "; ") $fix
+                    } elseif ($warnings.Count -gt 0) {
+                        Add-Row "claude registration" "WARN" ($detail + "; " + ($warnings -join "; ")) $fix
+                    } else {
+                        Add-Row "claude registration" "PASS" $detail
+                    }
                 }
             }
         }
@@ -162,7 +211,7 @@ if ($rtOk) {
         if (-not $pid0) { $pid0 = "Vissim.Vissim" }
         $serverEnv = @{ PYTHONUTF8 = "1"; VISSIM_PROGID = $pid0; VISSIM_ALLOWED_DIRS = $ProjectsDir; VISSIM_KILL_ON_EXIT = "1" }
     }
-    $r = Invoke-Native -FilePath $rtPy -Arguments @("-X", "utf8", "-m", "vissim_mcp", "--check") -Environment $serverEnv -TimeoutSec 120
+    $r = Invoke-Native -FilePath $rtPy -Arguments ($serverArgs + @("--check")) -Environment $serverEnv -TimeoutSec 120
     if ($r.ExitCode -eq 0) {
         $warn = @(($r.StdErr -split "`r?`n") | Where-Object { $_ -like "vissim-mcp: warning:*" })
         if ($warn.Count -gt 0) { Add-Row "configuration" "WARN" ($source + " env: " + ($warn -join " | ")) "correct the variable named in the warning" }
@@ -171,7 +220,7 @@ if ($rtOk) {
         Add-Row "configuration" "FAIL" ($source + " env: " + (Get-Tail $r.StdErr 3)) "fix the variable named in the message (re-register with install.ps1)"
     }
 
-    $server = @{ type = "stdio"; command = $rtPy; args = @("-X", "utf8", "-m", "vissim_mcp"); env = $serverEnv }
+    $server = @{ type = "stdio"; command = $rtPy; args = $serverArgs; env = $serverEnv }
     $jsonFile = Join-Path ([System.IO.Path]::GetTempPath()) ("vissim-mcp-doctor-" + [guid]::NewGuid().ToString("N") + ".json")
     try {
         [System.IO.File]::WriteAllText($jsonFile, ($server | ConvertTo-Json -Depth 4), $script:Utf8NoBom)
@@ -254,8 +303,8 @@ $procs = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'Vissim%'" -ErrorAct
 $embedded = @($procs | Where-Object { $_.CommandLine -match "(?i)-Embedding" })
 if ($embedded.Count -gt 0) {
     $ids = ($embedded | ForEach-Object { "PID " + $_.ProcessId }) -join ", "
-    Add-Row "Vissim processes" "WARN" ("COM-launched Vissim running: " + $ids + " (owned by a running or crashed MCP server)") `
-        "if no Claude Code session uses it: vissim_close / vissim_restart, or end exactly that PID in Task Manager"
+    Add-Row "Vissim processes" "WARN" ("COM-launched Vissim running: " + $ids + " (owned by a running MCP server, or left over by one that was killed)") `
+        "if a Claude Code session uses Vissim now, close it there with vissim_close; a leftover from an ended session is not closed by a new session's vissim_close/vissim_restart - after closing every Claude Code session end exactly that PID in Task Manager -> Details"
 } else {
     Add-Row "Vissim processes" "PASS" ("" + $procs.Count + " Vissim process(es), none COM-launched")
 }

@@ -115,3 +115,29 @@ function Get-DefaultRuntimeDir {
 function Get-DefaultDataDir {
     return (Join-Path $env:LOCALAPPDATA "vissim-mcp")
 }
+
+function Get-ProcessUnder {
+    # Running processes whose executable lies in $Dir (e.g. a Claude Code session's server python.exe of the
+    # runtime venv). Such a folder must not be deleted: Remove-Item would delete what it can and leave it broken.
+    param([string]$Dir)
+    $prefix = (Get-FullPath $Dir).ToLowerInvariant() + '\'
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLowerInvariant().StartsWith($prefix) })
+}
+
+function Remove-DirSafely {
+    # Delete $Path without ever leaving it half-deleted: first rename it (fails cleanly while a file in it is in
+    # use, and nothing is lost), then delete the renamed folder. Throws with a readable message on failure.
+    param([string]$Path)
+    $users = @(Get-ProcessUnder $Path)
+    if ($users.Count -gt 0) {
+        throw ("in use by " + (($users | ForEach-Object { $_.Name + " PID " + $_.ProcessId }) -join ", "))
+    }
+    $trash = $Path + ".deleting-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
+    try {
+        Rename-Item -LiteralPath $Path -NewName (Split-Path -Leaf $trash) -ErrorAction Stop
+    } catch {
+        throw ("a file in it is in use (" + $_.Exception.Message + "); nothing was deleted")
+    }
+    Remove-Item -LiteralPath $trash -Recurse -Force -ErrorAction Stop
+}

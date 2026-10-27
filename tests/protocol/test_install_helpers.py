@@ -62,7 +62,7 @@ def test_smoke_with_server_json_and_invalid_config_fails(server_env: dict[str, s
     config = {
         "type": "stdio",
         "command": sys.executable,
-        "args": ["-X", "utf8", "-m", "vissim_mcp"],
+        "args": ["-X", "utf8", "-P", "-m", "vissim_mcp"],
         "env": {"PYTHONUTF8": "1", "VISSIM_CALL_TIMEOUT_S": "-5"},
         "timeout": 900000,
     }
@@ -74,6 +74,26 @@ def test_smoke_with_server_json_and_invalid_config_fails(server_env: dict[str, s
     assert result["ok"] is False and "VISSIM_CALL_TIMEOUT_S" in result["error"]
 
 
+def test_smoke_runs_in_a_folder_with_decoy_modules(server_env: dict[str, str], tmp_path: Path) -> None:
+    """Claude Code starts the server in the opened folder: a csv.py / json.py there must not shadow it."""
+    good = {"command": sys.executable, "args": list(smoke_mod.SERVER_ARGS), "env": {"PYTHONUTF8": "1"}}
+    assert "-P" in good["args"]
+    path = tmp_path / "server.json"
+    path.write_text(json.dumps(good), encoding="utf-8")
+    completed = _run(SMOKE, ["--server-json", str(path), "--json"], server_env)
+    assert completed.returncode == 0, completed.stderr
+    summary = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert summary["ok"] is True and summary["cwd"] and summary["args"] == good["args"]
+
+    # the same server started without -P imports the decoy from the working directory and fails
+    old = dict(good, args=["-X", "utf8", "-m", "vissim_mcp"])
+    path.write_text(json.dumps(old), encoding="utf-8")
+    completed = _run(SMOKE, ["--server-json", str(path), "--json"], server_env)
+    assert completed.returncode == 1
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["ok"] is False and "imported from the working directory" in result["error"]
+
+
 def test_smoke_reads_a_whole_mcp_json(tmp_path: Path) -> None:
     path = tmp_path / ".mcp.json"
     path.write_text(
@@ -83,7 +103,7 @@ def test_smoke_reads_a_whole_mcp_json(tmp_path: Path) -> None:
     server = smoke_mod.load_server(str(path), None, ["B=2"])
     assert server == {
         "command": "C:\\rt\\python.exe",
-        "args": ["-X", "utf8", "-m", "vissim_mcp"],
+        "args": ["-X", "utf8", "-P", "-m", "vissim_mcp"],
         "env": {"A": "1", "B": "2"},
     }
 

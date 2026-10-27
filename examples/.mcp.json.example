@@ -3,7 +3,7 @@
     "vissim": {
       "type": "stdio",
       "command": "C:\\Users\\UltraPC\\AppData\\Local\\vissim-mcp\\venv\\Scripts\\python.exe",
-      "args": ["-X", "utf8", "-m", "vissim_mcp"],
+      "args": ["-X", "utf8", "-P", "-m", "vissim_mcp"],
       "env": {
         "PYTHONUTF8": "1",
         "VISSIM_PROGID": "Vissim.Vissim",

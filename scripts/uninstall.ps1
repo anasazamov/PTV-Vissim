@@ -7,6 +7,9 @@
   2. -RemoveRuntime: deletes the runtime venv (default %LOCALAPPDATA%\vissim-mcp\venv).
   3. -RemoveData: deletes the server logs and the audit log (%LOCALAPPDATA%\vissim-mcp\logs and \audit).
      Without it they are kept (the audit log is the record of every change made through the server).
+  A folder is never left half-deleted: it is not touched while a process runs from it (a Claude Code session's
+  server), and it is renamed first (fails cleanly while a file in it is open), then deleted.
+  For the project/local scope pass -ProjectsDir (the folder of the .mcp.json / local entry).
   The projects folder (models, results) is never touched. Never starts or stops Vissim.
 
 .EXAMPLE
@@ -43,11 +46,12 @@ function Remove-Dir([string]$Path, [string]$What) {
     if (-not (Test-Path -LiteralPath $Path)) { Write-Host ("    " + $What + " not present: " + $Path); return }
     if ($DryRun) { Write-Host ("    [dry-run] would delete " + $What + ": " + $Path); return }
     try {
-        Remove-Item -LiteralPath $Path -Recurse -Force
+        # Never half-deleted: refused while a process runs from it, renamed first, then deleted.
+        Remove-DirSafely $Path
         Write-Host ("    deleted " + $What + ": " + $Path)
     } catch {
         Write-Host ("    ERROR: cannot delete " + $Path + ": " + $_.Exception.Message) -ForegroundColor Red
-        Write-Host "    Fix: close every Claude Code session that uses the server (its python.exe), then retry." -ForegroundColor Red
+        Write-Host "    Fix: close every Claude Code session that uses the server (or /mcp -> vissim -> Disable), then retry." -ForegroundColor Red
         $script:exitCode = 1
     }
 }

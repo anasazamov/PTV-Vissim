@@ -31,7 +31,7 @@ Server versiyasi hozir `1.0.0rc1` (`src/vissim_mcp/__init__.py`).
 | Litsenziya "default" qilib saqlangan | Vissim oddiy ochilganda litsenziya tanlash dialogi chiqmasligi kerak |
 | Python 3.12 (yoki 3.13 / 3.11), **64-bit**, `py` launcher bilan | python.org o'rnatuvchisi; o'rnatuvchi o'zi topadi |
 | Claude Code — native Windows (WSL emas) | `%USERPROFILE%\.local\bin\claude.exe`; `claude --version` |
-| Birinchi o'rnatishda internet | `mcp`, `pywin32`, `psutil` yuklab olinadi; keyingi yangilashlar pip keshidan |
+| Internet (yoki proxy) — birinchi o'rnatishda va venv qayta yaratilganda | `mcp`, `pywin32`, `psutil` yuklab olinadi. Venv qayta yaratilganda (`-Force`, asosiy Python boshqa minor versiyaga yangilanganda, venv buzilganda) pip kesh bo'lsa ham paket indeksiga murojaat qiladi. Oddiy yangilash (venv saqlanadi) yangi narsa yuklamaydi. Versiyalar [`requirements-runtime.txt`](requirements-runtime.txt) bilan qotirilgan |
 
 ## O'rnatish
 
@@ -45,16 +45,23 @@ powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 Taxminan 1–3 daqiqa (birinchi marta). O'rnatuvchi **idempotent** — `git pull` dan keyin yoki `doctor.ps1` muammo
 ko'rsatganda qayta ishga tushiring. U nima qiladi:
 
-1. `py` launcher orqali 64-bit Python 3.12 ni (bo'lmasa 3.13, 3.11) tanlaydi.
+1. `py` launcher orqali 64-bit Python 3.12 ni (bo'lmasa 3.13, 3.11) tanlaydi. Server allaqachon ro'yxatda bo'lsa,
+   uning sozlamalarini o'qiydi va **aniq berilmagan har bir parametr uchun saqlab qoladi** (runtime papkasi,
+   `VISSIM_ALLOWED_DIRS`, `VISSIM_PROGID`, qo'shimcha o'zgaruvchilar) — oddiy qayta ishga tushirish ularni
+   standart qiymatlarga qaytarmaydi. Nima saqlangani ekranga chiqadi.
 2. Repozitoriyadan **tashqarida** alohida runtime venv yaratadi yoki yangilaydi:
    `%LOCALAPPDATA%\vissim-mcp\venv`. Venv buzilgan bo'lsa (masalan, asosiy Python o'chirilgan yoki boshqa minor
-   versiyaga yangilangan) — qayta yaratadi.
+   versiyaga yangilangan, pip yo'q) — qayta yaratadi. Qayta yaratishda eski venv **avval o'chirilmaydi**: undan
+   jarayon ishlayotgan bo'lsa (ochiq Claude Code sessiyasining serveri) o'rnatuvchi hech narsani o'zgartirmay
+   to'xtaydi; aks holda eski venv `<venv>.previous` ga ko'chiriladi, keyingi qadam xato bersa — joyiga qaytariladi
+   (server avvalgidek ishlayveradi), yangi venv smoke testdan o'tgandagina o'chiriladi.
 3. Paketni repozitoriyaning vaqtinchalik nusxasidan **editable bo'lmagan** holda o'rnatadi va paketning o'zini
    majburan qayta o'rnatadi (versiya o'zgarmagan bo'lsa ham joriy kod o'rnatiladi; repozitoriyada `build/` yoki
-   `*.egg-info` qolmaydi).
+   `*.egg-info` qolmaydi). Bog'liqliklar sinovdan o'tgan versiyalarda o'rnatiladi (`requirements-runtime.txt`,
+   `pip -c`).
 4. Runtime'ni tekshiradi: 64-bit, bog'liqliklar import qilinadi, o'rnatilgan kod repozitoriya bilan aynan bir xil.
 5. `<ProjectsDir>\models\original` papkasini yaratadi (asl modellar uchun, server u yerga yozmaydi).
-6. Ro'yxatdan o'tkaziladigan **aynan o'sha muhit** bilan `python -X utf8 -m vissim_mcp --check` ni bajaradi.
+6. Ro'yxatdan o'tkaziladigan **aynan o'sha muhit** bilan `python -X utf8 -P -m vissim_mcp --check` ni bajaradi.
 7. MCP stdio smoke test (`scripts\mcp_smoke.py`): `initialize` → `tools/list` (22 ta tool) → `vissim_health`.
    Vissim ishga tushirilmaydi.
 8. Claude Code'ga ro'yxatdan o'tkazadi (`scripts\register_claude.py` → `claude mcp add-json vissim <json> -s user`)
@@ -66,44 +73,61 @@ Parametrlar:
 
 | Parametr | Standart | Ma'nosi |
 |---|---|---|
-| `-ProjectsDir` | `D:\VissimProjects` | `VISSIM_ALLOWED_DIRS` — server fayl o'qishi/yozishi mumkin bo'lgan yagona ildiz |
-| `-ProgId` | `Vissim.Vissim` | `VISSIM_PROGID` (bir nechta Vissim versiyasi bo'lsa, masalan `Vissim.Vissim.2026`) |
+| `-ProjectsDir` | ro'yxatdagi qiymat, bo'lmasa `D:\VissimProjects` | `VISSIM_ALLOWED_DIRS` — server fayl o'qishi/yozishi mumkin bo'lgan ildiz |
+| `-ProgId` | ro'yxatdagi qiymat, bo'lmasa `Vissim.Vissim` | `VISSIM_PROGID` (bir nechta Vissim versiyasi bo'lsa, masalan `Vissim.Vissim.2026`) |
 | `-Scope` | `user` | `user` / `project` / `local` (pastga qarang; `user` tavsiya etiladi) |
-| `-RuntimeDir` | `%LOCALAPPDATA%\vissim-mcp\venv` | Runtime venv (repozitoriya ichida bo'lishi taqiqlangan) |
+| `-RuntimeDir` | ro'yxatdagi qiymat, bo'lmasa `%LOCALAPPDATA%\vissim-mcp\venv` | Runtime venv (repozitoriya ichida bo'lishi taqiqlangan) |
 | `-Python` | — | Asosiy Python'ni aniq ko'rsatish (`py` launcher o'rniga) |
-| `-ExtraEnv` | — | Qo'shimcha o'zgaruvchilar: `-ExtraEnv 'VISSIM_CALL_TIMEOUT_S=180','VISSIM_MAX_ROWS=1000'` |
-| `-NoRegister` | — | Claude Code'ga ro'yxatdan o'tkazmaslik (faqat o'rnatish va tekshirish) |
-| `-Force` | — | Runtime venv'ni noldan qayta yaratish |
+| `-ExtraEnv` | ro'yxatdagi qo'shimcha o'zgaruvchilar | Qo'shimcha o'zgaruvchilar: `-ExtraEnv 'VISSIM_CALL_TIMEOUT_S=180','VISSIM_MAX_ROWS=1000'`. Saqlangan o'zgaruvchilar ustiga qo'shiladi (bir xil nom — yangi qiymat); `'KEY='` uni olib tashlaydi |
+| `-Defaults` | — | Joriy ro'yxatdagi sozlamalarni o'qimaslik: faqat berilgan parametrlar va standart qiymatlar |
+| `-NoRegister` | — | Claude Code'ga ro'yxatdan o'tkazmaslik (faqat o'rnatish va tekshirish; ro'yxat o'qilmaydi) |
+| `-Force` | — | Runtime venv'ni noldan qayta yaratish (internet kerak; serverdan foydalanayotgan sessiyalarni avval yoping) |
 | `-Claude` | — | `claude.exe` yo'li (standart: PATH, keyin `%USERPROFILE%\.local\bin\claude.exe`) |
 
 O'rnatishdan keyin **yangi** Claude Code sessiyasini oching (yoki ochiq sessiyada `/mcp` → `vissim` → Reconnect) va
 `/mcp` da `vissim` ulangan (✔) ekanini, toollar soni 22 ekanini tekshiring.
 
 > Muhim: Claude Code ishlab turgan server jarayonini yangilamaydi — stdio serverlar avtomatik qayta ulanmaydi.
-> Qayta o'rnatishdan keyin har bir ochiq sessiyada `/mcp` → Reconnect qiling. Venv'ni qayta yaratish (`-Force`)
-> uchun avval serverdan foydalanayotgan sessiyalarni yoping (aks holda `python.exe` fayli band bo'ladi).
+> Qayta o'rnatishdan keyin har bir ochiq sessiyada `/mcp` → Reconnect qiling. Venv qayta yaratilishi kerak bo'lsa
+> (`-Force`, Python yangilangan, venv buzilgan) va server biror sessiyada ishlab turgan bo'lsa, o'rnatuvchi
+> "the runtime venv is in use (python.exe PID ...)" deb hech narsani o'zgartirmay to'xtaydi: sessiyalarni yoping
+> (yoki `/mcp` → `vissim` → Disable) va qayta ishga tushiring.
 
 ### Nega user scope va qayta yoqilgandan keyin nima bo'ladi
 
 - Server — oddiy stdio jarayon. Uni **Claude Code o'zi** har sessiya boshida ro'yxatdagi buyruq bo'yicha ishga
   tushiradi va sessiya tugaganda yopadi (stdin yopiladi, 300 ms dan keyin jarayon daraxti o'ldiriladi; server
-  ≤ 300 ms ichida chiqadi va o'zi ochgan Vissim'ni yopadi). Windows xizmati, avtoyuklash yoki qo'lda ishga tushirish
+  ≤ 300 ms ichida chiqadi va o'zi ochgan Vissim'ni yopadi — soxta COM qatlami va stand-in jarayon bilan
+  tekshirilgan, haqiqiy Vissim bilan M6 da tasdiqlanadi). Windows xizmati, avtoyuklash yoki qo'lda ishga tushirish
   **kerak emas** — kompyuter qayta yoqilgandan keyin Claude Code ochilishi bilan server ishlaydi.
 - `user` scope yozuvi `~/.claude.json` da saqlanadi: istalgan papkada ishlaydi, loyiha tasdiqlash so'rovi chiqmaydi,
   qayta yoqishdan keyin ham saqlanadi. Desktop ilovasining Code yorlig'i ham aynan `~/.claude.json` ni afzal ko'radi.
 - Ro'yxatdagi buyruq — runtime venv'ning `python.exe` sining **absolyut yo'li**, argumentlar
-  `-X utf8 -m vissim_mcp`, muhit `PYTHONUTF8=1`, `VISSIM_PROGID`, `VISSIM_ALLOWED_DIRS`, `VISSIM_KILL_ON_EXIT=1`,
+  `-X utf8 -P -m vissim_mcp`, muhit `PYTHONUTF8=1`, `VISSIM_PROGID`, `VISSIM_ALLOWED_DIRS`, `VISSIM_KILL_ON_EXIT=1`,
   `timeout` 900 000 ms. PATH, joriy papka, faollashtirilgan venv yoki repozitoriyadagi `git checkout` ga bog'liq
-  emas.
+  emas. `-P` (Python 3.11+) joriy papkani `sys.path` ga qo'shmaydi: Claude Code serverni o'zi ochilgan papkada
+  ishga tushiradi va u yerdagi `csv.py`, `json.py` kabi fayllar serverning importlarini to'sib qo'ya olmaydi
+  (PLAN 9.1 dagi misolda `-P` yo'q; bu ishonchlilik uchun qo'shimcha). Smoke test serverni aynan shunday "tuzoq"
+  modullar bor papkada ishga tushirib tekshiradi.
 - Bitta nomni ikki scope'da ro'yxatdan o'tkazmang (ustuvorlik `local` > `project` > `user`). `register_claude.py`
-  `vissim` boshqa scope'da topilsa, uni o'zgartirmaydi va xato bilan to'xtaydi (tuzatish buyrug'ini aytadi).
+  `vissim` boshqa scope'da topilsa — uy papkasidan ham, `VISSIM_ALLOWED_DIRS` papkalaridan ham qaraladi (u yerdagi
+  `.mcp.json` yoki `local` yozuv uy papkasidan ko'rinmaydi) — uni o'zgartirmaydi va chiqish kodi `3` bilan to'xtaydi
+  (tuzatish buyrug'ini aytadi). `add-json` xato bersa, o'chirilgan avvalgi yozuv qayta qo'shiladi.
 - Qayta yoqilgandan keyin server ishlamasa, sababi deyarli har doim tashqarida: CodeMeter xizmati ishga tushmagan,
   asosiy Python o'chirilgan/yangilangan, antivirus. `scripts\doctor.ps1` hammasini bir yo'la tekshiradi.
 
-`project` scope (jamoaviy `.mcp.json`) kerak bo'lsa: `install.ps1 -Scope project` (`.mcp.json` `-ProjectsDir`
-papkasida yaratiladi, birinchi ochilganda Claude Code tasdiq so'raydi) yoki
-[`examples/.mcp.json.example`](examples/.mcp.json.example) ni loyiha papkasiga `.mcp.json` nomi bilan ko'chiring.
-Bu holda user scope yozuvini olib tashlang (`scripts\uninstall.ps1`).
+`project` scope (jamoaviy `.mcp.json`) kerak bo'lsa, tartib muhim — **avval** user scope yozuvini olib tashlang,
+keyin o'rnating (aks holda o'rnatuvchi ikki scope ziddiyatini aniqlab to'xtaydi):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Scope project -ProjectsDir D:\VissimProjects
+```
+
+`.mcp.json` `-ProjectsDir` papkasida yaratiladi, birinchi ochilganda Claude Code tasdiq so'raydi. Yoki
+[`examples/.mcp.json.example`](examples/.mcp.json.example) ni loyiha papkasiga `.mcp.json` nomi bilan ko'chiring
+(yo'lni o'zgartiring). Keyingi barcha buyruqlarda shu `-Scope project -ProjectsDir ...` ni takrorlang
+(`install.ps1`, `uninstall.ps1`, `doctor.ps1 -ProjectsDir ...`).
 
 ## Konfiguratsiya
 
@@ -137,9 +161,11 @@ qiymat — aniq xabar bilan chiqish kodi `2`. Joriy qiymatlarni `vissim_health` 
 (*) — haqiqiy Vissim'da hali tasdiqlanmagan ([`docs/com-names.md`](docs/com-names.md)); M6 da tekshiriladi.
 
 Qoidalar: bo'sh qiymat = standart; mantiqiy qiymatlar `1/0`, `true/false`, `yes/no`, `on/off`; noma'lum `VISSIM_*`
-o'zgaruvchi (masalan, `VISSIM_ALLOWED_DIR`) — ogohlantirish va taklif. Qiymatni o'zgartirish: o'rnatuvchini kerakli
-parametr bilan qayta ishga tushiring (`-ProjectsDir`, `-ProgId`, `-ExtraEnv`), keyin `/mcp` → Reconnect. Windows
-foydalanuvchi muhit o'zgaruvchilari ham serverga meros bo'lib o'tadi, lekin ro'yxatdagi `env` ularni bosib ketadi.
+o'zgaruvchi (masalan, `VISSIM_ALLOWED_DIR`) — ogohlantirish va taklif. Qiymatni o'zgartirish: o'rnatuvchini faqat
+o'zgaradigan parametr bilan qayta ishga tushiring (`-ProjectsDir`, `-ProgId` yoki `-ExtraEnv 'KEY=qiymat'`;
+`'KEY='` — olib tashlash), qolganlari ro'yxatdagi qiymatlaridan olinadi; keyin `/mcp` → Reconnect. Hammasini
+standartga qaytarish: `-Defaults`. Windows foydalanuvchi muhit o'zgaruvchilari ham serverga meros bo'lib o'tadi,
+lekin ro'yxatdagi `env` ularni bosib ketadi.
 
 ## Claude Code'da ishlatish
 
@@ -179,7 +205,7 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
 | | `vissim_resume_simulation` | Pauzadan davom ettirish | yozuvchi |
 | | `vissim_stop_simulation` | Keyingi bo'lak chegarasida to'xtatish | yozuvchi |
 | Natijalar | `vissim_export_csv` | Kolleksiya atributlarini CSV'ga (`;`, utf-8-sig), audit | yozuvchi |
-| Signallar | `vissim_set_signal_state` | Signal guruhi holati (faqat pauzada), kontrollerga qaytarish | yozuvchi |
+| Signallar | `vissim_set_signal_state` | Signal guruhi holati (job yo'q yoki pauzada), kontrollerga qaytarish | yozuvchi |
 | Diagnostika | `vissim_tail_log` | Server log oxiri (≤ 500 qator) | o'qish |
 | | `vissim_exec_python` | Ixtiyoriy Python kodi — standart holatda **o'chiq** (`EXEC_DISABLED`) | buzuvchi |
 
@@ -208,8 +234,13 @@ Tavsiya etilgan sozlamalar (PLAN 9.2–9.3):
 - **Kod bajarish.** `vissim_exec_python` faqat `VISSIM_MCP_ALLOW_EXEC=1` bilan; yoqilganda ham kod to'liq audit
   qilinadi. `settings.json.example` uni Claude Code darajasida ham taqiqlaydi.
 - **Jarayonlar.** Server faqat o'zi COM orqali ochgan (`-Embedding`) va PID + ishga tushgan vaqt bilan tasdiqlangan
-  Vissim'ni yopadi/o'ldiradi; siz o'zingiz ochgan Vissim oynasiga hech qachon tegmaydi. Server qanday tugamasin,
-  kill-on-close Job Object o'z Vissim'ini Windows orqali yopadi (litsenziya seat'i band bo'lib qolmaydi).
+  Vissim'ni yopadi/o'ldiradi; siz o'zingiz ochgan Vissim oynasiga hech qachon tegmaydi. Server qanday tugamasin
+  (hatto o'ldirilsa ham), kill-on-close Job Object o'z Vissim'ini Windows orqali yopishi kerak — bu soxta qatlam va
+  stand-in jarayon bilan tekshirilgan, haqiqiy `Vissim260.exe -Embedding` bilan M6 da tasdiqlanadi. Job Object
+  biriktirilmasa (masalan, Vissim administrator sifatida ishlayotgan bo'lsa), `vissim_connect` ogohlantirish beradi
+  (`job_object: false`) — u holda server o'ldirilsa Vissim qolishi mumkin. Yangi sessiyadagi server avvalgi
+  sessiyadan qolgan Vissim'ni yopa olmaydi (`vissim_close`/`vissim_restart` faqat o'zi ochganini boshqaradi):
+  bunday jarayonni `doctor.ps1` ko'rsatadi, uni Task Manager'da yopasiz.
 - **Audit.** Har bir yozuvchi amal (muvaffaqiyatli, rad etilgan yoki xato) bitta JSONL yozuv: eski/yangi qiymatlar,
   saqlangan faylning sha256 va zaxira yo'li.
 - **Maxfiylik (Q7).** Tool natijalari Claude modeli kontekstiga yuboriladi. Server faqat so'ralgan ustunlarni
@@ -236,7 +267,7 @@ argument va atribut qiymatlari yozilmaydi (ular faqat auditda).
 # "Kecha ishlagan edi, qayta yoqilgandan keyin ishlamayapti" — faqat o'qiydigan tekshiruv:
 powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
 
-# Yangilash (git pull dan keyin) — xuddi o'rnatish kabi:
+# Yangilash (git pull dan keyin) — xuddi o'rnatish kabi; -ProjectsDir/-ProgId/-ExtraEnv ro'yxatdan olinadi:
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1
 
 # Ro'yxatdan chiqarish (venv, log va audit saqlanadi):
@@ -250,13 +281,20 @@ xil; `claude mcp get vissim` runtime yo'liga ishora qiladi va ulanadi; ro'yxatda
 (22 tool, `vissim_health`); ProgID/CLSID va `LocalServer32` fayli; CodeMeter xizmati; Vissim litsenziyalari
 (`cmu --list-network`); qolib ketgan COM Vissim jarayonlari; log papkasi yozilishi; log oxiri. Har bir
 muvaffaqiyatsiz qator uchun tuzatish yo'li chiqadi; FAIL bo'lsa chiqish kodi `1`. Doctor hech narsani o'zgartirmaydi
-(log papkasidagi bir lahzalik sinov faylidan tashqari), Vissim'ni ishga tushirmaydi va to'xtatmaydi. Parametrlar:
-`-RuntimeDir`, `-ProjectsDir`, `-ProgId` (server ro'yxatda bo'lmaganda taxmin qilinadigan qiymatlar), `-NoClaude`
+(log papkasidagi bir lahzalik sinov faylidan tashqari), Vissim'ni ishga tushirmaydi va to'xtatmaydi. Ro'yxat
+ikki joydan tekshiriladi: uy papkasidan (user scope — Desktop ilovasining Code yorlig'i shuni ishlatadi) va loyiha
+papkasidan (Claude Code u yerda ishlatadigan yozuv: `local` > `project` > `user`). Bitta nom ikki scope'da bo'lsa —
+FAIL, faqat `project`/`local` scope bo'lsa — WARN, argumentlarda `-P` bo'lmasa — WARN. Parametrlar: `-RuntimeDir`,
+`-ProjectsDir` (Claude Code ochiladigan papka; standart — ro'yxatdagi `VISSIM_ALLOWED_DIRS` ning birinchisi, bo'lmasa
+`D:\VissimProjects`), `-ProgId` (server ro'yxatda bo'lmaganda taxmin qilinadigan qiymat), `-NoClaude`
 (`install.ps1 -NoRegister` dan keyin ro'yxat tekshiruvini o'tkazib yuborish), `-LogLines`. Hozir bu
 kompyuterda "Vissim license" qatori kutilgan holda FAIL (Demo).
 
-`uninstall.ps1` parametrlari: `-Scope` (standart `user`), `-RemoveRuntime`, `-RemoveData`, `-KeepRegistration`,
-`-DryRun`. Loyiha papkasiga (`D:\VissimProjects`) hech qachon tegmaydi.
+`uninstall.ps1` parametrlari: `-Scope` (standart `user`), `-ProjectsDir` (`project`/`local` scope uchun —
+`.mcp.json` / yozuv joylashgan papka), `-RemoveRuntime`, `-RemoveData`, `-KeepRegistration`, `-DryRun`. Venv yoki
+log papkasi serverdan foydalanayotgan sessiya tufayli band bo'lsa, hech narsa o'chirilmaydi (papka avval qayta
+nomlanadi, keyin o'chiriladi — yarim o'chirilgan holat qolmaydi). Loyiha papkasiga (`D:\VissimProjects`) hech
+qachon tegmaydi.
 
 ## Dasturchilar uchun
 
@@ -298,7 +336,9 @@ Test qatlamlari (haqiqiy Vissim'siz; CI — Windows va Linux):
 | `preflight.ps1`, `com_smoke.py` | M0 pre-flight (`-ComSmoke` haqiqiy Vissim'ni ochadi — faqat COM litsenziyasi bilan) |
 | `probe_com_names.py` | M6: COM nomlarini haqiqiy Vissim'da tekshirish |
 
-`mcp` SDK: o'rnatilgan versiya 1.30.0 (`pyproject.toml`: `mcp>=1.10,<2`). `stdio_server(stdin=, stdout=)` ikkala
+`mcp` SDK: o'rnatilgan versiya 1.30.0 (`pyproject.toml`: `mcp>=1.10,<2`). Runtime venv uchun sinovdan o'tgan
+bog'liqliklar to'plami `requirements-runtime.txt` da (install.ps1 uni `pip -c` bilan beradi); yangi versiyalarni
+sinab ko'rgandan keyingina yangilang. `stdio_server(stdin=, stdout=)` ikkala
 parametrni qabul qiladi — PLAN 6.1 dagi asosiy yo'l ishlatilgan: `stdio_guard` fd 1 ni stderr'ga yo'naltiradi,
 MCP faqat himoyalangan asl stdout nusxasiga yozadi. Barcha toollar `structured_output=False` bilan `CallToolResult`
 qaytaradi; `ToolAnnotations` (`readOnlyHint`, `destructiveHint`) qo'yilgan.

@@ -9,8 +9,10 @@ powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
 
 Doctor faqat o'qiydi (Vissim'ni ochmaydi va yopmaydi) va har bir FAIL qatori uchun tuzatish yo'lini ko'rsatadi.
 Ko'pincha yechim — o'rnatuvchini qayta ishga tushirish:
-`powershell -ExecutionPolicy Bypass -File scripts\install.ps1` (kerak bo'lsa `-Force`), keyin Claude Code'da
-`/mcp` → `vissim` → Reconnect.
+`powershell -ExecutionPolicy Bypass -File scripts\install.ps1`, keyin Claude Code'da `/mcp` → `vissim` → Reconnect.
+O'rnatuvchi joriy ro'yxatdagi `-ProjectsDir`/`-ProgId`/`-ExtraEnv` va runtime papkasini o'zi saqlab qoladi
+(ekranda "kept ..." qatori). `-Force` (venv'ni noldan yaratish) internet/proxy talab qiladi va serverdan
+foydalanayotgan sessiyalar yopiq bo'lishi kerak; muvaffaqiyatsiz bo'lsa eski venv joyiga qaytariladi.
 
 Tool xatosi doim `{"ok": false, "error": {"code", "message", "hint"}}` ko'rinishida keladi; `hint` dagi tavsiyani
 birinchi bo'lib bajaring. COM xato matnlari Windows tilida (bu kompyuterda ruscha) keladi — server ularni HRESULT
@@ -113,14 +115,21 @@ qaytadan `vissim_start_simulation`. `RPC_S_CALL_FAILED` (`-2147023170`) — javo
 2. `claude mcp list` va `claude mcp get vissim`: `Scope` (`User config` bo'lishi kerak), `Command` — runtime
    `python.exe` (`%LOCALAPPDATA%\vissim-mcp\venv\Scripts\python.exe`), `Status`.
 3. Ro'yxatda yo'q → `install.ps1`. Boshqa scope'da (`Local config` / `Project config`) eski yozuv bor → o'rnatuvchi
-   to'xtaydi va buyruqni aytadi, masalan `claude mcp remove vissim -s local`; keyin `install.ps1`. Bitta nom ikki
-   scope'da bo'lsa, `local` > `project` > `user` ustuvor; Desktop ilovasining Code yorlig'i esa `~/.claude.json`
-   (user) ni afzal ko'radi — natijada turli joyda turli server ishlaydi.
+   (chiqish kodi 3) va doctor buni uy papkasidan ham, loyiha papkasidan (`VISSIM_ALLOWED_DIRS`, masalan
+   `D:\VissimProjects\.mcp.json`) ham aniqlaydi va buyruqni aytadi, masalan
+   `cd D:\VissimProjects; claude mcp remove vissim -s local`; keyin `install.ps1`. Bitta nom ikki scope'da bo'lsa,
+   `local` > `project` > `user` ustuvor; Desktop ilovasining Code yorlig'i esa `~/.claude.json` (user) ni afzal
+   ko'radi — natijada turli joyda turli server ishlaydi. `claude mcp get vissim` ni Claude Code ochiladigan papkada
+   bajaring — u yerdan ko'rinadigan yozuv muhim.
 4. `.mcp.json` (project scope) ishlatilsa — birinchi ochilganda Claude Code tasdiq so'raydi ("Pending approval").
 5. Batafsil log: `claude --debug=mcp` bilan ishga tushiring — serverning stderr'i va ulanish xatosi ko'rinadi.
    Server stderr'iga faqat WARNING va undan yuqorisi chiqadi; to'liq log — 11-bo'lim.
-6. Server qo'lda: `& "$env:LOCALAPPDATA\vissim-mcp\venv\Scripts\python.exe" -X utf8 -m vissim_mcp --check`
-   (konfiguratsiya, chiqish kodi 2 = xato o'zgaruvchi nomi bilan) va `--version`.
+6. Server qo'lda: `& "$env:LOCALAPPDATA\vissim-mcp\venv\Scripts\python.exe" -X utf8 -P -m vissim_mcp --check`
+   (konfiguratsiya, chiqish kodi 2 = xato o'zgaruvchi nomi bilan) va `--version`. Diqqat: bu buyruq **joriy
+   PowerShell oynasidagi** o'zgaruvchilarni tekshiradi, ro'yxatdagi `env` ni emas (`VISSIM_ALLOWED_DIRS` bo'sh
+   bo'lgani uchun "no allowed directories" ogohlantirishi chiqishi tabiiy). Claude Code ishlatadigan muhitni
+   `doctor.ps1` ning "configuration" qatori tekshiradi. Qo'lda tekshirish kerak bo'lsa, avval o'sha oynada
+   `claude mcp get vissim` dagi qiymatlarni o'rnating, masalan `$env:VISSIM_ALLOWED_DIRS = "D:\VissimProjects"`.
 
 ## 7. Kompyuter qayta yoqilgandan keyin ishlamayapti
 
@@ -130,9 +139,9 @@ qayta yoqishdan keyingi muammolar tashqi sabablardan:
 | Belgisi | Sababi | Yechim |
 |---|---|---|
 | `vissim_connect` litsenziya xatosi, kecha ishlagan | **CodeMeter** xizmati ishga tushmagan yoki tarmoq litsenziya serveri hali ko'rinmaydi | `doctor.ps1` → "CodeMeter". Administrator: `Start-Service CodeMeter`, `services.msc` da start type = Automatic. Tarmoq litsenziyasi: bir daqiqa kutib qayta urining |
-| `/mcp` da `vissim` failed, doctor'da "runtime python" FAIL | Asosiy Python o'chirilgan, ko'chirilgan yoki boshqa minor versiyaga yangilangan (venv unga bog'liq) | `install.ps1` (venv avtomatik qayta yaratiladi) yoki `install.ps1 -Force` |
+| `/mcp` da `vissim` failed, doctor'da "runtime python" FAIL | Asosiy Python o'chirilgan, ko'chirilgan yoki boshqa minor versiyaga yangilangan (venv unga bog'liq) | `install.ps1` (venv avtomatik qayta yaratiladi; internet/proxy kerak) yoki `install.ps1 -Force` |
 | "installed code" WARN | Repozitoriya yangilangan, runtime eski | `install.ps1`, keyin `/mcp` → Reconnect |
-| Vissim seat band, "Vissim processes" WARN | Oldingi sessiyadan `-Embedding` Vissim qolgan (masalan, quvvat uzilishi) | Claude Code'da `vissim_close`/`vissim_restart`; yoki Task Manager → Details → faqat doctor ko'rsatgan PID |
+| Vissim seat band, "Vissim processes" WARN | Oldingi sessiyadan `-Embedding` Vissim qolgan (masalan, server yoki Claude Code qulagan/o'ldirilgan va Job Object biriktirilmagan edi) | Yangi sessiyadagi `vissim_close`/`vissim_restart` uni yopa **olmaydi** — server faqat o'zi ochgan Vissim'ni boshqaradi, `vissim_restart` esa yana bir nusxa ochadi. Barcha Claude Code sessiyalarini yoping, keyin Task Manager → Details → faqat doctor ko'rsatgan PID → End task |
 | Log papkasi FAIL | Ruxsat yoki antivirus | 9-bo'lim |
 
 Runtime venv repozitoriyadan tashqarida (`%LOCALAPPDATA%\vissim-mcp\venv`) va paket editable emas — shuning uchun
