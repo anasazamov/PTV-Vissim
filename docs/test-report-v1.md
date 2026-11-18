@@ -105,10 +105,21 @@ nusxalash/o'chirish, rad etiladigan holatlar, pauzadagi simulyatsiyaga avtomobil
 | 25 | Job pauzada turganda har qanday metod rad etilardi — simulyatsiya paytida avtomobil qo'shib bo'lmasdi | Faqat ishlayotgan job rad etadi; pauzada chaqiruv Vissim'ga yuboriladi (tarmoq tahririni Vissim o'zi rad etadi), `New` — har qanday faol job'da rad etiladi |
 | 26 | Polosa (`AddLane`) uchun javobda kalit yo'q edi | Kalit sifatida `Index` qaytadi |
 
-Sinalmay qolganlari docs/com-names.md jadvalining oxirgi qatorlarida: argument formati aniqlanmagan bir necha
-funksiya (`AddBoardDelFunc`, `AddCurvSpeedFunc`, `AddLatDriftSpeedFunc`), dinamik taqsimlash yo'llari (`Net.Paths`),
-simulyatsiya paytida piyoda qo'shish, va haqiqiy rasm/3D fayl bilan `AddBackgroundImage`/`AddStatic3DModel`.
-Piyoda va jamoat transporti obyektlari **yaratildi**, lekin ular bilan simulyatsiya o'tkazilmagan.
+**Qolgan metodlar ham sinaldi** (`tests/real/test_real_methods_more.py`, 4 ta test, haqiqiy Vissim'da o'tdi):
+
+| Nima | Natija |
+|---|---|
+| `AddCurvSpeedFunc`, `AddBoardDelFunc` | nuqta formati `[x, y, yMin, yMax]`; yaratildi, nuqtalar qayta o'qildi |
+| `AddLatDriftSpeedFunc` | nuqta formati `[x, y]`, x ≥ 1 |
+| `AddAreaBehaviorTypeElement` | ishladi |
+| `AddBackgroundImage`, `AddStatic3DModel`, `AddModel2D3D` | ruxsat etilgan papkaga ko'chirilgan haqiqiy `.jpg` va `.v3d` bilan ishladi (to'liq va nisbiy yo'l); o'sha fayllarning asl (tashqi) yo'li — `ATTRIBUTE_DENIED` |
+| Piyoda simulyatsiyasi | maydonlar + kirish oqimi + marshrut: 100-soniyada tarmoqda piyodalar bor; pauzada `AddPedestrianOnArea`, `AddPedestrianOnAreaAtCoordinate`, `RemovePedestrian` ishladi |
+| Jamoat transporti simulyatsiyasi | bekat + liniya + 3 ta jo'nash: avtobuslar tarmoqda; pauzada `AddVehicleToPTLine` ishladi |
+| Dinamik taqsimlash | PTV misol tarmog'ida pauzada `AddPath`, `AddPathForVehicleType`, `AddPathForVehicle`, `AddVehicleInParkingLot`, `AddVehicleInZone` ishladi |
+
+Hali ham aniq emas (docs/com-names.md, jadvalning oxirgi qatori): `AddShortestPathForVehicleType` (to'g'ri
+`DTAInterval` topilmadi — Vissim "Unknown error" qaytardi), `RemovePath` (`false` qaytardi), va bir necha ichki
+kolleksiya metodi (`AddPedestrianRouteLocationOnArea`, `AddVehClassDrivingBehavior` va h.k.) sinalmagan.
 
 ### Ochiq qolganlar
 
@@ -121,8 +132,9 @@ Piyoda va jamoat transporti obyektlari **yaratildi**, lekin ular bilan simulyats
 - Bitta Vissim versiyasi/tili bilan sinalgan. Modellar: `COM Basic Commands` (34 havola), `Karlsruhe 3D` (2579
   havola) va noldan qurilgan chorraha. 10 000 m dan katta yoki 20 tadan ko'p kontrollerli tarmoqlar litsenziya
   sababli sinalmadi; soatlab davom etadigan real yuklama ham sinalmagan (Karlsruhe'da 900 s — 20 s).
-- `vissim_call_method`: 80 kolleksiyaning metodlari sinalgan (yuqoridagi bo'lim); bir necha metod formati
-  aniqlanmagan, piyoda va jamoat transporti obyektlari bilan simulyatsiya o'tkazilmagan.
+- `vissim_call_method`: 80 kolleksiyaning metodlari, piyoda/jamoat transporti simulyatsiyasi va dinamik
+  taqsimlash metodlari sinalgan (yuqoridagi bo'lim); `AddShortestPathForVehicleType`, `RemovePath` va bir necha
+  ichki kolleksiya metodi aniq emas. Piyoda va PT bo'yicha natija o'lchovlari (sayohat vaqti) tekshirilmagan.
 - Svetofor: faqat qat'iy vaqtli dastur; to'qnashuvchi yashillar va oraliq vaqtlar tekshirilmaydi.
 
 ---
@@ -197,10 +209,10 @@ Buyruqlar (repozitoriya ildizida):
 .\.venv\Scripts\python.exe -X utf8 -m ruff check src tests scripts
 ```
 
-Natija (2026-11-18, M6 tuzatishlari va kengaytmadan keyin): **1022 passed, 1 skipped, 18 deselected** (~90 s);
+Natija (2026-11-18, M6 tuzatishlari va kengaytmadan keyin): **1022 passed, 1 skipped, 22 deselected** (~90 s);
 ruff toza.
 Skip: `tests/unit/test_policy.py::test_symlink_escape_is_denied` — bu kompyuterda symlink yaratish uchun huquq yo'q
-(`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 18 deselected — `tests/real`.
+(`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 22 deselected — `tests/real`.
 2026-10-27 dagi (M6 tayyorgarlik) natija: 908 passed; M7 dan keyin 970.
 
 Bosqichlar tarixi (commit'lar bo'yicha):

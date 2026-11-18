@@ -393,8 +393,9 @@ qaytaradi; `ToolAnnotations` (`readOnlyHint`, `destructiveHint`) qo'yilgan.
   Remove…` metodlari haqiqiy Vissim'da sinalgan (ro'yxat va argument formatlari: `docs/com-names.md`, "Tarmoq qurish
   metodlari"). Massiv argumentlari **tekis** ro'yxat bo'lishi kerak (`[x1, y1, x2, y2, ...]`); noto'g'ri shaklni
   Vissim jimgina e'tiborsiz qoldiradi — server buni xato sifatida qaytaradi. Svetofor dasturi — faqat qat'iy vaqtli
-  (fixed-time); to'qnashuvchi yashillar tekshirilmaydi. Sinalmagan: piyoda va jamoat transporti bilan simulyatsiya,
-  dinamik taqsimlash yo'llari, haqiqiy orqa fon rasmi/3D model fayllari, bir necha funksiya formati.
+  (fixed-time); to'qnashuvchi yashillar tekshirilmaydi. Piyoda va jamoat transporti simulyatsiyasi, dinamik
+  taqsimlash yo'llari, orqa fon rasmi va 3D model fayllari ham sinalgan. Aniq emas: `AddShortestPathForVehicleType`,
+  `RemovePath` va bir necha ichki kolleksiya metodi.
 - **Run boshlanmay qolgandan keyin** Vissim shu sessiyada keyingi runlarni ham boshlamaydi: tuzatilgan tarmoqni
   saqlab `vissim_load_network` bilan qayta yuklash kerak (xato maslahatida aytiladi).
 - **Q7 (ma'lumot siyosati) ochiq.** Yuridik bo'lim tasdig'igacha faqat test modellari.
