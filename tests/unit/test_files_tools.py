@@ -272,12 +272,13 @@ async def test_save_network_policy_errors(
     h, mcp = setup
     assert (await call(mcp, "vissim_save_network", {"save_as": "x.inpx"}))["error"]["code"] == "NOT_CONNECTED"
     await call(mcp, "vissim_connect")
+    (projects / "a_file").write_text("x", encoding="utf-8")
     cases = {
         "models/original/copy.inpx": "READ_ONLY_PATH",
         "models/original/city.inpx": "READ_ONLY_PATH",
         str(tmp_path / "outside.inpx"): "PATH_DENIED",
         "scenarios/v2.layx": "INVALID_ARGUMENT",
-        "no_such_folder/v2.inpx": "FILE_NOT_FOUND",
+        "a_file/v2.inpx": "FILE_NOT_FOUND",  # the folder cannot be created: a file has that name
     }
     for path, code in cases.items():
         payload = await call(mcp, "vissim_save_network", {"save_as": path, "overwrite_loaded": True})
@@ -391,3 +392,25 @@ async def test_file_tools_audit_schema_invalid_arguments(
     tools = {tool.name: tool for tool in await mcp.list_tools()}
     save = tools["vissim_save_network"].inputSchema["properties"]
     assert save["save_as"]["type"] == "string" and save["overwrite_loaded"]["type"] == "boolean"
+
+
+async def test_save_network_creates_a_missing_folder(
+    setup: tuple[Harness, FastMCP], projects: Path, isolated_env: dict[str, Path]
+) -> None:
+    """The first save of a session usually goes to a folder that does not exist yet (work/variant1.inpx)
+    and the client has no tool to create one (real Vissim session, M6)."""
+    h, mcp = setup
+    await call(mcp, "vissim_connect")
+    saved = await call(mcp, "vissim_save_network", {"save_as": "work/2026/variant1.inpx"})
+    folder = projects / "work" / "2026"
+    assert saved["ok"] is True, saved
+    assert saved["created_folder"] == str(folder) and folder.is_dir()
+    assert saved["saved_path"] == str(folder / "variant1.inpx") and (folder / "variant1.inpx").is_file()
+    again = await call(mcp, "vissim_save_network", {"save_as": "work/2026/variant2.inpx"})
+    assert again["ok"] is True and "created_folder" not in again
+    records = [r for r in audit_records(isolated_env["audit"]) if r["tool"] == "vissim_save_network"]
+    assert records[0]["created_folder"] == str(folder) and "created_folder" not in records[1]
+    # nothing is created for a refused path
+    refused = await call(mcp, "vissim_save_network", {"save_as": "models/original/new/x.inpx"})
+    assert refused["error"]["code"] == "READ_ONLY_PATH"
+    assert not (projects / "models" / "original" / "new").exists()

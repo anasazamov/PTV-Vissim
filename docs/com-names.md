@@ -19,71 +19,88 @@ PLAN.md 0-bo'lim, 5-tamoyil: **haqiqiy Vissim'da tasdiqlanmagan nom kodga qattiq
 - **[AX]** — `C:\Program Files\PTV Vision\PTV Vissim 2026\Doc\Eng\attribute.xlsx` ("Attributes" varag'i: obyekt, atribut, tahrirlanishi, simulyatsiya paytidagi xatti-harakati, qiymat turi, min/max/standart).
 - **[EX]** — rasmiy misol `Examples Training\COM\Basic Commands\COM Basic Commands.py` va `Run 3 Simulations.vbs` (Vissim 2026).
 
-> 2026-10-16 holatiga ko'ra hech bir nom `verified` emas: kompyuterdagi yagona litsenziya — Demo (COM moduli yo'q),
-> shuning uchun COM orqali Vissim ishga tushmaydi (docs/preflight-report.md). M6 litsenziya hal bo'lgach bajariladi.
+> 2026-11-18 da M6 o'tkazildi: PTV Vissim Academic 2026 (SP 10), ruscha interfeys. Quyidagi nomlar
+> `scripts/probe_com_names.py` va `tests/real` bilan haqiqiy Vissim'da tekshirilgan (docs/test-report-v1.md).
+> 2026-10-16 gacha (M0–M5) faqat Demo litsenziya bor edi va hech bir nom `verified` emas edi.
+
+## M6 da aniqlangan xatti-harakatlar (haqiqiy Vissim 2026)
+
+| Nima | Kuzatilgan | Kodda |
+|---|---|---|
+| Mantiqiy atributlar | COM orqali `True/False` emas, butun son `1/0` keladi (`ContrByCOM`, `UseMaxSimSpeed`, `IsRunning`, `IsConn`) | `vissim_set_signal_state` `ContrByCOM` ni `true/false` ga aylantiradi; umumiy `get/list` toollari qiymatni o'zgartirmaydi |
+| Enum atributlar | Katta harfli satr: `KeepPrevResults` = `"KEEPALL"`, `SigState` = `"REDAMBER"`; yozishda satr ham, raqam ham qabul qilinadi (`SigState=1` → `"RED"`) | `vissim_start_simulation` ogohlantirishi `KEEPALL`/`3` ni "hammasi saqlanadi" deb biladi |
+| `SetAttValue` | Type library'da yo'q: bu pywin32 ning `AttValue` xossasiga yozish (property put) uchun nomi. `vissim_describe` `AttValue` ni `property_get` va `property_put` sifatida ko'rsatadi | o'zgarishsiz (pywin32 orqali ishlaydi) |
+| `IAttribute.ID` / `Code` / `Name` | `ID` — tilga bog'liq bo'lmagan identifikator (`NO`, `NAME`, `LENGTH2D`; `AttValue` registrga befarq qabul qiladi). `Code` va `Name` — interfeys tilida (ruscha: `№`, `Имя`, `Длина2D`); `AttValue("№")` xato beradi | `vissim_describe(include_attributes=true)` har bir atribut uchun `id` qaytaradi |
+| `SimBreakAt` va `IsSimBreakAtActive` | `SimBreakAt=N` yozilganda `IsSimBreakAtActive` o'zi `1` bo'ladi; `RunContinuous()` aynan N da to'xtaydi (`IsRunning=1`) | server `IsSimBreakAtActive` ni yozmaydi — kerak emas |
+| `SimBreakAt=0` | Break yo'q: run oxirigacha boradi | `VISSIM_BREAK_DISABLE_VALUE=0` to'g'ri |
+| Run tugagandan keyin | `SimSec=0`, `IsRunning=0`; `SimulationRuns` ga qator run **boshlanganda** qo'shiladi, `SimEnd` — yetib borilgan soniya | `jobs.py` run'dan keyingi `SimSec` ga tayanmaydi (o'zgarishsiz) |
+| O'tib ketgan break (`SimSec=120` da `SimBreakAt=60`) | `RunContinuous()` run'ni oxirigacha olib boradi (`SimSec=0`, `IsRunning=0`) | job bunday holatdan to'g'ri tugaydi (`test_stale_break_does_not_break_a_job`) |
+| `SigState` / `ContrByCOM` simulyatsiyadan tashqarida | O'qilganda bo'sh (`None`), yozib bo'lmaydi ("Атрибут … не может быть изменен") | `vissim_set_signal_state` bu holatda `pause_at` bilan pauza qilishni maslahat beradi |
+| `SigState` pauzada | Yoziladi; `ContrByCOM` o'zi `1` bo'ladi; `ContrByCOM=False` kontrollerga qaytaradi | o'zgarishsiz |
+| Litsenziya dialogi | To'g'ri litsenziya bilan ham taxminan har sakkizinchi ishga tushishda "Управление лицензиями - PTV Vissim" oynasi chiqdi (bir marta ketma-ket ikki bor); keyingi urinish odatda muvaffaqiyatli | `vissim_connect`/`vissim_restart` yana 2 martagacha urinadi |
 
 Holat ustunini `scripts/probe_com_names.py --i-have-a-com-license --update` yangilaydi (ishlatish tartibi:
 docs/m6-runbook.md). Skript har bir qatorni birinchi katakdagi nom bo'yicha topadi — qator nomini o'zgartirsangiz,
 skriptdagi `PROBES` ro'yxatini ham o'zgartiring (`tests/unit/test_probe_com_names.py` buni tekshiradi).
 
 <!-- probe:auto:start -->
-> `scripts/probe_com_names.py` hali haqiqiy Vissim'da ishga tushirilmagan (COM litsenziyasi yo'q, Demo).
+> Oxirgi `scripts/probe_com_names.py` ishga tushirilishi: 2026-11-18 — 32 ta nom `verified`, 0 ta `rejected`, 0 ta tekshirilmadi. Xom natijalar: docs/test-report-v1.md.
 <!-- probe:auto:end -->
 
 ## Metodlar va xossalar (COM interfeys a'zolari)
 
 | Nom | Qayerda ishlatiladi | Manba | Holat |
 |---|---|---|---|
-| `Vissim.LoadNet(path, additive)` | `vissim_load_network` | TL, EX | documented |
-| `Vissim.LoadLayout(path)` | `vissim_load_network` | TL, EX | documented |
-| `Vissim.SaveNetAs(path)` | `vissim_save_network` | TL, EX | documented |
-| `Vissim.Exit()` | `vissim_close` | TL | documented |
-| `Vissim.SuspendUpdateGUI()` / `ResumeUpdateGUI(bool)` | `vissim_configure_simulation` | TL, EX | documented |
-| `Vissim.Net`, `.Simulation`, `.Evaluation`, `.Graphics` | resolver ildizlari | TL, EX | documented |
-| `Graphics.CurrentNetworkWindow` | QuickMode | TL, EX | documented |
-| `Simulation.RunContinuous()` / `RunSingleStep()` / `Stop()` | `jobs.py` | TL, EX | documented |
-| `<collection>.Count`, `.ItemByKey(key)`, `.ItemKeyExists(key)` | resolver, `vissim_info`, bulk | TL, EX | documented |
-| `Net.Links`, `.Nodes`, `.SignalControllers`, `.SignalHeads`, `.VehicleInputs`, `.VehicleRoutingDecisionsStatic`, `.DataCollectionMeasurements`, `.VehicleTravelTimeMeasurements`, `.QueueCounters` | `vissim_info` (`Count`; har biri alohida o'qiladi, o'qib bo'lmasa `null` + `errors`) | TL (`INet` a'zolari, 2026-10-16 oflayn qayta tekshirildi) | documented |
-| `<collection>.GetMultipleAttributes(tuple)` | `vissim_list_objects`, `vissim_export_csv` | TL, EX | documented |
-| `<obj>.AttValue(name)` / `.SetAttValue(name, value)` | barcha get/set | TL, EX | documented |
-| `<collection>.Attributes.GetAll()` → `IAttribute.Code/Name/ValueType/Editable` | `vissim_describe(include_attributes=true)` | TL | documented |
-| `_oleobj_.GetTypeInfo()` → `GetTypeAttr().cFuncs` → `GetFuncDesc(i)` → `GetNames(memid)` | `vissim_describe` | TL (oflayn tekshirildi) | documented |
-| `Net.SignalControllers[n].SGs[m]` | `vissim_set_signal_state` | TL, EX | documented |
-| `Net.SimulationRuns` (`GetMultipleAttributes(('No','RandSeed','SimEnd'))`) | natijalar | TL, EX | documented |
+| `Vissim.LoadNet(path, additive)` | `vissim_load_network` | TL, EX | verified |
+| `Vissim.LoadLayout(path)` | `vissim_load_network` | TL, EX | verified |
+| `Vissim.SaveNetAs(path)` | `vissim_save_network` | TL, EX | verified |
+| `Vissim.Exit()` | `vissim_close` | TL | verified |
+| `Vissim.SuspendUpdateGUI()` / `ResumeUpdateGUI(bool)` | `vissim_configure_simulation` | TL, EX | verified |
+| `Vissim.Net`, `.Simulation`, `.Evaluation`, `.Graphics` | resolver ildizlari | TL, EX | verified |
+| `Graphics.CurrentNetworkWindow` | QuickMode | TL, EX | verified |
+| `Simulation.RunContinuous()` / `RunSingleStep()` / `Stop()` | `jobs.py` | TL, EX | verified |
+| `<collection>.Count`, `.ItemByKey(key)`, `.ItemKeyExists(key)` | resolver, `vissim_info`, bulk | TL, EX | verified |
+| `Net.Links`, `.Nodes`, `.SignalControllers`, `.SignalHeads`, `.VehicleInputs`, `.VehicleRoutingDecisionsStatic`, `.DataCollectionMeasurements`, `.VehicleTravelTimeMeasurements`, `.QueueCounters` | `vissim_info` (`Count`; har biri alohida o'qiladi, o'qib bo'lmasa `null` + `errors`) | TL (`INet` a'zolari, 2026-10-16 oflayn qayta tekshirildi) | verified |
+| `<collection>.GetMultipleAttributes(tuple)` | `vissim_list_objects`, `vissim_export_csv` | TL, EX | verified |
+| `<obj>.AttValue(name)` / `.SetAttValue(name, value)` | barcha get/set | TL, EX | verified |
+| `<collection>.Attributes.GetAll()` → `IAttribute.Code/Name/ValueType/Editable` | `vissim_describe(include_attributes=true)` | TL | verified |
+| `_oleobj_.GetTypeInfo()` → `GetTypeAttr().cFuncs` → `GetFuncDesc(i)` → `GetNames(memid)` | `vissim_describe` | TL (oflayn tekshirildi) | verified |
+| `Net.SignalControllers[n].SGs[m]` | `vissim_set_signal_state` | TL, EX | verified |
+| `Net.SimulationRuns` (`GetMultipleAttributes(('No','RandSeed','SimEnd'))`) | natijalar | TL, EX | verified |
 
 ## Atributlar
 
 | Nom | Obyekt | Qayerda ishlatiladi | Manba | Holat | Izoh |
 |---|---|---|---|---|---|
-| `SimPeriod` | Simulation | configure, start | AX, EX | documented | min 1, max 2 678 400, standart 3600; simulyatsiya paytida faqat o'qish |
-| `SimRes` | Simulation | configure, `jobs.py` (bitta vaqt qadami: run oxirini aniqlash) | AX | documented | 1–1000, standart 10 |
-| `SimSec` | Simulation | `jobs.py` (bo'lak tekshiruvi) | AX | documented | faqat o'qish. Run tugagandan keyin qiymati (0 yoki period) — **noma'lum**, kod bunga tayanmaydi |
-| `SimBreakAt` | Simulation | `jobs.py` | AX, EX | documented | min 0, standart 0, simulyatsiya paytida tahrirlanadi |
-| `RandSeed` | Simulation | `VISSIM_SEED_ATTR` | AX, EX | documented → configurable | min 1 (EX: "RandSeed 0 is not allowed"), standart 42; simulyatsiya paytida faqat o'qish |
-| `UseMaxSimSpeed` | Simulation | configure | AX, EX | documented | bool |
-| `NumCores` | Simulation | configure `extra` orqali | AX | documented | min 1; `UseAllCores` (bool, standart true) bilan birga |
-| `IsRunning` | Simulation | (diagnostika) | AX | documented | faqat o'qish; pauza paytidagi qiymati noma'lum |
-| `IsSimBreakAtActive` | Simulation | — | AX | documented | **Vissim 2026 da yangi**, standart false. `SimBreakAt` bilan bog'liqligi noma'lum — M6 da tekshiriladi |
-| `NumRuns`, `RandSeedIncr` | Simulation | ishlatilmaydi | AX | documented | server ko'p runni o'zi boshqaradi |
-| `QuickMode` | NetworkWindow (`Graphics.CurrentNetworkWindow`) | configure | EX | documented | 1/0 |
-| `KeepPrevResults` | Evaluation | `start` ogohlantirishi | AX, TL | documented | enum `KeepPreviousResults`: 1 KeepNone, 2 KeepCurrent, 3 KeepAll (standart KeepAll) |
-| `SigState` | SignalGroup | `vissim_set_signal_state` | AX, EX, TL | documented | enum `SignalizationState`: 1 Red, 2 RedAmber, 3 Green, 4 Amber, 5 Off, 6 Undefined, 7 FlashingAmber, 8 FlashingRed, 9 FlashingGreen, 10 AlternatingRedGreen, 11 GreenAmber; EX satr bilan yozadi: `"GREEN"`, `"RED"`, `"AMBER"`, `"REDAMBER"` |
-| `ContrByCOM` | SignalGroup | `vissim_set_signal_state` | AX, EX | documented | `SigState` yozilganda avtomatik `True`; `False` — kontrollerga qaytarish; faqat simulyatsiya paytida faol |
+| `SimPeriod` | Simulation | configure, start | AX, EX | verified | min 1, max 2 678 400, standart 3600; simulyatsiya paytida faqat o'qish |
+| `SimRes` | Simulation | configure, `jobs.py` (bitta vaqt qadami: run oxirini aniqlash) | AX | verified | 1–1000, standart 10 |
+| `SimSec` | Simulation | `jobs.py` (bo'lak tekshiruvi) | AX | verified | faqat o'qish. Run tugagandan keyin qiymati (0 yoki period) — **noma'lum**, kod bunga tayanmaydi |
+| `SimBreakAt` | Simulation | `jobs.py` | AX, EX | verified | min 0, standart 0, simulyatsiya paytida tahrirlanadi |
+| `RandSeed` | Simulation | `VISSIM_SEED_ATTR` | AX, EX | verified → configurable | min 1 (EX: "RandSeed 0 is not allowed"), standart 42; simulyatsiya paytida faqat o'qish |
+| `UseMaxSimSpeed` | Simulation | configure | AX, EX | verified | bool |
+| `NumCores` | Simulation | configure `extra` orqali | AX | verified | min 1; `UseAllCores` (bool, standart true) bilan birga |
+| `IsRunning` | Simulation | (diagnostika) | AX | verified | faqat o'qish; pauza paytidagi qiymati noma'lum |
+| `IsSimBreakAtActive` | Simulation | — | AX | verified | **Vissim 2026 da yangi**, standart false. `SimBreakAt` bilan bog'liqligi noma'lum — M6 da tekshiriladi |
+| `NumRuns`, `RandSeedIncr` | Simulation | ishlatilmaydi | AX | verified | server ko'p runni o'zi boshqaradi |
+| `QuickMode` | NetworkWindow (`Graphics.CurrentNetworkWindow`) | configure | EX | verified | 1/0 |
+| `KeepPrevResults` | Evaluation | `start` ogohlantirishi | AX, TL | verified | enum `KeepPreviousResults`: 1 KeepNone, 2 KeepCurrent, 3 KeepAll (standart KeepAll) |
+| `SigState` | SignalGroup | `vissim_set_signal_state` | AX, EX, TL | verified | enum `SignalizationState`: 1 Red, 2 RedAmber, 3 Green, 4 Amber, 5 Off, 6 Undefined, 7 FlashingAmber, 8 FlashingRed, 9 FlashingGreen, 10 AlternatingRedGreen, 11 GreenAmber; EX satr bilan yozadi: `"GREEN"`, `"RED"`, `"AMBER"`, `"REDAMBER"` |
+| `ContrByCOM` | SignalGroup | `vissim_set_signal_state` | AX, EX | verified | `SigState` yozilganda avtomatik `True`; `False` — kontrollerga qaytarish; faqat simulyatsiya paytida faol |
 
 ## Sozlanadigan qiymatlar (PLAN.md 5-bo'lim, (*) belgilari)
 
 | O'zgaruvchi | Standart | Asos | Holat |
 |---|---|---|---|
-| `VISSIM_SEED_ATTR` | `RandSeed` | AX, EX | configurable (documented) |
-| `VISSIM_BREAK_DISABLE_VALUE` | `0` | EX: "`SimBreakAt` = 0 means no break!", VBS: "If set to 0 then the simulation is not paused"; AX: min 0, standart 0 | configurable (documented) |
+| `VISSIM_SEED_ATTR` | `RandSeed` | AX, EX | configurable (verified) |
+| `VISSIM_BREAK_DISABLE_VALUE` | `0` | EX: "`SimBreakAt` = 0 means no break!", VBS: "If set to 0 then the simulation is not paused"; AX: min 0, standart 0 | configurable (verified) |
 
-## M6 da tekshiriladigan jarayon xatti-harakatlari
+## Jarayon xatti-harakatlari (M6 da tekshirildi, 2026-11-18)
 
-| Nima | Hozirgi holat (M2) | M6 da tekshirish |
+| Nima | Kodda | M6 natijasi |
 |---|---|---|
-| Job Object `LimitFlags` | Faqat `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (0x2000), PLAN 6.4 bo'yicha; `BREAKAWAY_OK` yo'q | Haqiqiy Vissim (litsenziya yordamchisi, crash reporter, yordam oynasi va h.k.) `CREATE_BREAKAWAY_FROM_JOB` bilan jarayon ochadimi? Ochsa, Windows uni rad etadi (`ERROR_ACCESS_DENIED`). Shunday bo'lsa — flag'ni o'zgartirish faqat loyiha egasining roziligi bilan |
-| `Exit()` javobi | Javob qaytsa ham, `RPC_S_CALL_FAILED` / `RPC_E_DISCONNECTED` bilan tugasa ham jarayon 10 s kutiladi | Haqiqiy Vissim `Exit()` da qanday javob beradi va jarayon qancha vaqtda tugaydi |
-| `ItemByKey` kalit turi | `vissim_set_attribute_bulk` kalitni o'zgartirmasdan uzatadi; `5` va `"5"` takror kalit sifatida rad etiladi. Soxta (fake) kolleksiya satr kalitni butun songa aylantiradi — bu **tasdiqlanmagan** | Butun sonli kalitli kolleksiyada (`Net.Links`) `ItemByKey("5")` ishlaydimi, xato beradimi yoki boshqa obyektni qaytaradimi. Ishlamasa — raqamli satr kalitni `int` ga aylantirish yoki rad etish |
+| Job Object `LimitFlags` | Faqat `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (0x2000), PLAN 6.4 bo'yicha; `BREAKAWAY_OK` yo'q | Vissim va uning bola jarayonlari (7 ta `msedgewebview2.exe`) Job Object ichida; ishga tushishda xato yo'q. Server o'ldirilganda Vissim 1 s ichida yo'qoladi. Flag'ni o'zgartirish kerak emas |
+| `Exit()` javobi | Javob qaytsa ham, `RPC_S_CALL_FAILED` / `RPC_E_DISCONNECTED` bilan tugasa ham jarayon 10 s kutiladi | `Exit()` javob qaytaradi, jarayon 3,7–6 s da tugaydi (`method: exit`); simulyatsiya pauzada turgan holatda ham |
+| `ItemByKey` kalit turi | `vissim_set_attribute_bulk` kalitni o'zgartirmasdan uzatadi; `5` va `"5"` takror kalit sifatida rad etiladi | `Net.Links.ItemByKey("1")` va `ItemKeyExists("1")` ishlaydi va o'sha obyektni qaytaradi (`No=1`) — soxta kolleksiya xatti-harakati to'g'ri |
 
 ## Yo'l (fayl) atributlari — `ATTRIBUTE_DENIED` siyosati
 

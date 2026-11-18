@@ -174,6 +174,12 @@ def _fake_report(statuses: dict[str, str]) -> dict:
     }
 
 
+def _status_in(text: str, name: str) -> str:
+    """The status cell of the row ``name`` in a docs/com-names.md text."""
+    (status,) = [cells[col] for _, cells, col in probe.table_rows(text) if col and cells[0] == name]
+    return status
+
+
 def test_update_com_names_rewrites_only_the_status_cells() -> None:
     text = COM_NAMES.read_text(encoding="utf-8")
     report = _fake_report(
@@ -194,7 +200,8 @@ def test_update_com_names_rewrites_only_the_status_cells() -> None:
         "configurable (verified)"
     )
     assert rows["`Vissim.Exit()`"][0][rows["`Vissim.Exit()`"][1]] == "verified"
-    assert rows["`SimRes`"][0][rows["`SimRes`"][1]] == "documented"  # skipped rows keep their status
+    # skipped rows keep their status (whatever docs/com-names.md says today)
+    assert rows["`SimRes`"][0][rows["`SimRes`"][1]] == _status_in(text, "`SimRes`")
     assert "2026-11-02 — 5 ta nom `verified`" not in updated  # 4 ok + 1 failed
     assert "2026-11-02 — 4 ta nom `verified`, 1 ta `rejected`" in updated
     assert updated.count(probe.PROBE_MARK_START) == 1
@@ -329,7 +336,7 @@ def test_update_leaves_inconclusive_rows_unchanged_and_lists_them() -> None:
     report = _fake_report({"`SimPeriod`": probe.INCONCLUSIVE, "`SimRes`": probe.OK})
     updated = probe.update_com_names(text, report, "2026-11-02")
     rows = {cells[0]: (cells, col) for _, cells, col in probe.table_rows(updated) if col}
-    assert rows["`SimPeriod`"][0][rows["`SimPeriod`"][1]] == "documented"
+    assert rows["`SimPeriod`"][0][rows["`SimPeriod`"][1]] == _status_in(text, "`SimPeriod`")
     assert rows["`SimRes`"][0][rows["`SimRes`"][1]] == "verified"
     assert "1 ta aniq natija bermadi (holati o'zgartirilmadi: `SimPeriod`)" in updated
     assert "1 inconclusive" in probe.report_section(report)

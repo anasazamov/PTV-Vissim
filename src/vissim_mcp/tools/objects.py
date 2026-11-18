@@ -342,8 +342,11 @@ def _attribute_infos(obj: Any, label: str, limit: int) -> dict[str, Any]:
         if is_connection_error(exc):
             raise
         return {"attributes": None, "attributes_error": describe_exception(exc, 300)}
+    # ID is the language-independent identifier AttValue understands (case-insensitive); Code and Name are
+    # in the language of the Vissim user interface (real Vissim 2026, Russian UI: ID "NO", Code "№").
     rows = [
         {
+            "id": _read_property(info, "ID"),
             "code": _read_property(info, "Code"),
             "name": _read_property(info, "Name"),
             "value_type": _read_property(info, "ValueType"),
@@ -649,7 +652,9 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         strings.
 
         Parameters: path - object path; include_attributes - also list the attributes of the objects of a
-        collection (Attributes.GetAll: code, name, value_type, editable; at most VISSIM_MAX_ROWS).
+        collection (Attributes.GetAll: id, code, name, value_type, editable; at most VISSIM_MAX_ROWS). Use
+        id as the attribute name in the other tools (it is the same in every Vissim language and
+        case-insensitive: "NUMLANES" = "NumLanes"); code and name are in Vissim's user interface language.
         Returns: path, interface, members ([{name, kind}], kind = method | property_get | property_put),
         and with include_attributes: attributes, attributes_total, attributes_truncated (or
         attributes_error). Without type information but with include_attributes, members is null and

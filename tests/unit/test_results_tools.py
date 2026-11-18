@@ -109,7 +109,7 @@ async def test_export_csv_non_ascii_path(harness: MakeHarness, projects: Path) -
     [
         ("models/original/links.csv", "READ_ONLY_PATH"),
         ("results/links.txt", "INVALID_ARGUMENT"),
-        ("missing_folder/links.csv", "FILE_NOT_FOUND"),
+        ("models/original/new_folder/links.csv", "READ_ONLY_PATH"),
         ("../outside.csv", "PATH_DENIED"),
     ],
 )
@@ -195,3 +195,21 @@ async def test_export_of_simulation_results(harness: MakeHarness, projects: Path
 def test_csv_cell() -> None:
     assert csv_cell(None) == "" and csv_cell(True) == 1 and csv_cell(2.5) == 2.5 and csv_cell("a") == "a"
     assert csv_cell([1, None, "x"]) == "1,,x"
+
+
+async def test_export_csv_creates_a_missing_folder(
+    harness: MakeHarness, projects: Path, isolated_env: dict[str, Path]
+) -> None:
+    _h, mcp = await connected(harness)
+    args = {"collection": "Net.Links", "attributes": ["No", "Name"], "csv_path": "out/run1/links.csv"}
+    result = await call(mcp, "vissim_export_csv", args)
+    folder = projects / "out" / "run1"
+    assert result["ok"] is True, result
+    assert result["created_folder"] == str(folder) and (folder / "links.csv").is_file()
+    again = await call(mcp, "vissim_export_csv", args)
+    assert again["ok"] is True and again["overwritten"] is True and "created_folder" not in again
+    # a collection that does not exist: nothing is created
+    bad = await call(
+        mcp, "vissim_export_csv", {"collection": "Net.Nope", "attributes": ["No"], "csv_path": "out2/x.csv"}
+    )
+    assert bad["ok"] is False and not (projects / "out2").exists()

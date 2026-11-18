@@ -60,7 +60,7 @@ def test_killed_vissim_gives_a_clear_error_and_restart_recovers(
             "pid": restarted["pid"],
             "previous_pid": restarted.get("previous_pid"),
             "killed": restarted.get("killed"),
-            "warnings": restarted["warnings"],
+            "warnings": restarted.get("warnings", []),
         }
     )
     assert restarted["pid"] not in (None, own.pid)
@@ -110,7 +110,7 @@ def test_modal_dialog_gives_timeout_hung_and_restart_recovers(
         restart_after_dialog={
             "pid": restarted["pid"],
             "killed": restarted.get("killed"),
-            "warnings": restarted["warnings"],
+            "warnings": restarted.get("warnings", []),
         }
     )
     assert wait_gone(own), f"the hung Vissim PID {own.pid} survived vissim_restart"

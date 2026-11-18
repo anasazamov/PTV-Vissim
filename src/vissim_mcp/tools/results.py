@@ -26,7 +26,7 @@ from ..resolver import Segment, format_path, parse_path, resolve
 from ..service import VissimService
 from ..worker import WorkerContext
 from ._common import AuditRecord, StringArg, register_tool
-from .files import require_folder
+from .files import ensure_folder
 from .objects import (
     COM_OBJECT_MARKER,
     _member,
@@ -105,15 +105,16 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         One GetMultipleAttributes call reads the whole collection; the file is ';'-separated, UTF-8 with BOM
         (opens directly in Excel), one header row with the attribute names, then one row per object in
         collection order. csv_path must be a .csv inside the allowed directories and outside the read-only
-        ones; a relative path is relative to the first allowed directory and the folder must exist. An
+        ones; a relative path is relative to the first allowed directory; a missing folder is created. An
         existing file is replaced. Written to the audit log.
 
         Parameters: collection - collection path (e.g. "Net.Links", "Net.DataCollectionMeasurements");
         attributes - 1..200 attribute names, result attributes too (e.g. ["No", "Vehs(Current,Last,All)"]);
         csv_path - the target file.
-        Returns: path, rows (objects written), columns, sha256, size_bytes, overwritten, warnings.
-        Errors: PATH_DENIED, READ_ONLY_PATH, INVALID_ARGUMENT, FILE_NOT_FOUND (folder missing),
-        RESOLVE_FAILED, COM_ERROR (details.invalid_attributes), NOT_CONNECTED, TIMEOUT_HUNG.
+        Returns: path, rows (objects written), columns, sha256, size_bytes, overwritten, created_folder
+        (only when a folder was created), warnings.
+        Errors: PATH_DENIED, READ_ONLY_PATH, INVALID_ARGUMENT, FILE_NOT_FOUND (the folder could not be
+        created), RESOLVE_FAILED, COM_ERROR (details.invalid_attributes), NOT_CONNECTED, TIMEOUT_HUNG.
 
         Example: vissim_export_csv(collection="Net.Links", attributes=["No", "Name"], csv_path="links.csv")
         """
@@ -126,9 +127,11 @@ def register(mcp: FastMCP, service: VissimService) -> None:
             service.ensure_connected()
             target, warnings = await asyncio.to_thread(policy.check_write, csv_path, EXPORT_EXT)
             audit.update(path=str(target))
-            await asyncio.to_thread(require_folder, target)
             task = functools.partial(export_rows_task, segments, names)
             rows = await service.call(task, task_name="vissim_export_csv")
+            created_folder = await asyncio.to_thread(ensure_folder, target)
+            if created_folder:
+                audit.update(created_folder=created_folder)
             existed = await asyncio.to_thread(target.exists)
             try:
                 digest, size = await asyncio.to_thread(write_csv, target, names, rows)
@@ -140,15 +143,18 @@ def register(mcp: FastMCP, service: VissimService) -> None:
                     details={"path": str(target)},
                 ) from None
             audit.update(rows=len(rows), columns=names, sha256=digest, size_bytes=size, overwritten=existed)
-        return {
+        result: dict[str, Any] = {
             "path": str(target),
             "rows": len(rows),
             "columns": names,
             "sha256": digest,
             "size_bytes": size,
             "overwritten": existed,
-            "warnings": [*warnings, *audit.warnings],
         }
+        if created_folder:
+            result["created_folder"] = created_folder
+        result["warnings"] = [*warnings, *audit.warnings]
+        return result
 
     register_tool(
         mcp,

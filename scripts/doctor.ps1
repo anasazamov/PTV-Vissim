@@ -14,7 +14,8 @@
     5. MCP smoke           - initialize -> tools/list (22 tools) -> vissim_health over stdio
     6. COM ProgID          - the ProgID/CLSID is registered and its LocalServer32 executable exists
     7. CodeMeter           - the CodeMeter license service is running
-    8. Vissim license      - licenses listed by "cmu --list-network" (Demo/Student licenses have no COM module)
+    8. Vissim license      - PTV licenses listed by "cmu --list-network" (Demo/Student licenses have no COM module;
+                             a full license may be listed as "PTV Base License")
     9. Vissim processes    - COM-launched (-Embedding) Vissim processes that may hold the license seat (the server
                              only closes the Vissim it started itself; a leftover one is ended in Task Manager)
    10. log directory       - the server log directory is writable (a probe file is created and deleted)
@@ -288,9 +289,12 @@ if (-not $cmu) {
             $products += ($current + " (used " + $Matches[1] + ", free " + $Matches[2] + ")"); $current = $null
         }
     }
-    $vissim = @($products | Where-Object { $_ -match "Vissim" })
+    # A full license is not always named "Vissim": an Academic installation lists "PTV Base License (UFC ...)"
+    # next to "PTV Vissim (Demo)" and starts through COM (verified with real Vissim 2026). The list does not
+    # show the COM module itself, so a non-Demo PTV license is a PASS and vissim_connect is the real test.
+    $vissim = @($products | Where-Object { $_ -match "(?i)vissim|\bPTV\b" })
     $full = @($vissim | Where-Object { $_ -notmatch "(?i)demo|student" })
-    if ($full.Count -gt 0) { Add-Row "Vissim license" "PASS" ($full -join "; ") }
+    if ($full.Count -gt 0) { Add-Row "Vissim license" "PASS" (($full -join "; ") + " - the COM module is not shown here; vissim_connect is the real test") }
     elseif ($vissim.Count -gt 0) {
         Add-Row "Vissim license" "FAIL" ("only " + ($vissim -join "; ") + " - no COM module") "activate a full Vissim license with the COM module (or PTV Hub subscription) and save it as default"
     } else {

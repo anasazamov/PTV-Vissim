@@ -270,6 +270,7 @@ async def test_job_object_is_assigned_early_during_a_slow_start(harness: MakeHar
 
 async def test_license_dialog_closes_the_new_vissim(harness: MakeHarness) -> None:
     h = harness(spawn_options={"titles": [LICENSE_DIALOG_TITLE]}, dispatch_delay_s=30)
+    h.service.start_retries = 0
     user = h.procs.spawn(com=False)
     started = time.monotonic()
     error = await raises(ErrorCode.COM_ERROR, h.service.connect())
@@ -322,13 +323,98 @@ async def test_start_timeout_kills_the_single_new_com_process(harness: MakeHarne
 
 async def test_failed_dispatch_kills_the_left_over_com_process(harness: MakeHarness) -> None:
     h = harness(dispatch_error=CO_E_SERVER_EXEC_FAILURE)
+    h.service.start_retries = 0
     error = await raises(ErrorCode.COM_ERROR, h.service.connect())
     (proc,) = h.procs.table.values()
     assert error.message.startswith("starting Vissim failed (Dispatch 'Vissim.Vissim'): ")
+    assert "start attempts" not in error.message
     assert error.hint == HRESULT_HINTS[CO_E_SERVER_EXEC_FAILURE]
     assert error.details is not None
     assert error.details["hresult_hex"] == "0x80080005" and error.details["killed_pid"] == proc.pid
     assert proc.ended_by == "kill"
+
+
+# --- one more start attempt after a failure that looks like a missing license (real Vissim, M6: seen now and
+# --- then with a valid license when Vissim is started shortly after another instance ended)
+
+
+async def test_start_is_repeated_once_after_a_license_dialog(harness: MakeHarness) -> None:
+    procs = FakeProcs()
+    spawned: list[Any] = []
+
+    def dialog_first(backend: Any, progid: str) -> Any:
+        if not spawned:
+            backend.dispatch_delay_s = 30  # the first Vissim sits behind its license dialog
+            spawned.append(procs.spawn(titles=[LICENSE_DIALOG_TITLE]))
+        else:
+            spawned.append(procs.spawn())
+        return spawned[-1]
+
+    h = harness(procs=procs, on_dispatch=dialog_first)
+    result = await h.service.connect()
+    first, second = spawned
+    assert first.ended_by == "kill" and second.alive and procs.killed == [first.pid]
+    assert result["pid"] == second.pid and result["attempts"] == 2 and result["generation"] == 2
+    (warning,) = result["warnings"]
+    assert warning.startswith("start attempt 1 failed (Vissim showed a license dialog while starting")
+    health = h.service.health()
+    assert health["connected"] is True and health["pid"] == second.pid and health["last_error"] is None
+    assert health["warnings"] == [warning]
+    assert await h.service.call(lambda ctx: ctx.vissim.Net.Links.Count, task_name="count") > 0
+
+
+async def test_start_is_repeated_once_after_server_execution_failed(harness: MakeHarness) -> None:
+    procs = FakeProcs()
+    spawned: list[Any] = []
+
+    def fail_first(backend: Any, progid: str) -> Any:
+        backend.dispatch_error = None if spawned else CO_E_SERVER_EXEC_FAILURE
+        spawned.append(procs.spawn())
+        return spawned[-1]
+
+    h = harness(procs=procs, on_dispatch=fail_first)
+    result = await h.service.connect()
+    assert result["attempts"] == 2 and result["pid"] == spawned[1].pid
+    assert spawned[0].ended_by == "kill" and spawned[1].alive
+
+
+async def test_two_failed_start_attempts_are_reported(harness: MakeHarness) -> None:
+    h = harness(spawn_options={"titles": [LICENSE_DIALOG_TITLE]}, dispatch_delay_s=30)
+    assert h.service.start_retries == 2
+    error = await raises(ErrorCode.COM_ERROR, h.service.connect())
+    first, second, third = h.procs.table.values()
+    assert first.ended_by == "kill" and second.ended_by == "kill" and third.ended_by == "kill"
+    assert error.message.endswith("(3 start attempts)") and LICENSE_DIALOG_TITLE in error.message
+    assert error.details == {
+        "window_titles": [LICENSE_DIALOG_TITLE],
+        "pid": third.pid,
+        "killed": True,
+        "attempts": 3,
+    }
+    assert error.hint == HRESULT_HINTS[CO_E_SERVER_EXEC_FAILURE]
+    health = h.service.health()
+    assert health["connected"] is False and health["connecting"] is False
+
+
+async def test_other_start_failures_are_not_repeated(harness: MakeHarness) -> None:
+    h = harness({"VISSIM_CONNECT_TIMEOUT_S": "0.3"}, dispatch_delay_s=30)
+    await raises(ErrorCode.TIMEOUT_HUNG, h.service.connect())
+    assert len(h.procs.table) == 1
+    h = harness(dispatch_error=CO_E_CLASSSTRING)
+    await raises(ErrorCode.COM_ERROR, h.service.connect())
+    assert h.service.generation == 1
+
+
+async def test_close_cancels_the_wait_before_the_second_start_attempt(harness: MakeHarness) -> None:
+    h = harness(dispatch_error=CO_E_SERVER_EXEC_FAILURE)
+    h.service.start_retry_delay_s = 30
+    connecting = asyncio.ensure_future(h.service.connect())
+    await eventually(lambda: h.service.generation == 1 and h.service.connecting and h.service.worker is None)
+    started = time.monotonic()
+    await h.service.close()
+    error = await raises(ErrorCode.NOT_CONNECTED, connecting)
+    assert "cancelled by vissim_close" in error.message and time.monotonic() - started < 3
+    assert h.service.generation == 1 and h.service.connecting is False
 
 
 async def test_connect_clean_up_never_kills_a_process_without_com_launch(harness: MakeHarness) -> None:

@@ -143,3 +143,27 @@ def test_flush_logging_never_waits_long_for_a_busy_handler(settings: Settings, c
     finally:
         release.set()
         holder.join(5)
+
+
+def test_sdk_validation_noise_is_one_line(
+    settings: Settings, clean_logging: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Claude Code sends ``server/discover``; mcp 1.30 logs ~100 lines of pydantic errors for it (seen in the
+    real server log, M6)."""
+    log_path = setup_logging(settings)
+    assert log_path is not None
+    noise = "Failed to validate request: 31 validation errors for ClientRequest\n" + "\n".join(
+        f"{name}.method\n  Input should be '{name}' [type=literal_error, input_value='server/discover', "
+        "input_type=str]"
+        for name in ("PingRequest", "InitializeRequest", "CallToolRequest")
+    )
+    logging.getLogger().warning(noise)
+    logging.getLogger().warning("Failed to validate request: short")
+    logging.getLogger("other").warning("a real warning\nwith two lines")
+    flush_logging(1.0)
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    (compact,) = [line for line in lines if "does not support" in line]
+    assert "unknown method 'server/discover'" in compact and " INFO " in compact
+    assert not any("literal_error" in line for line in lines)
+    assert any("Failed to validate request: short" in line for line in lines)
+    assert any("a real warning" in line for line in lines) and any(line == "with two lines" for line in lines)

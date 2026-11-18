@@ -16,17 +16,17 @@ Loyihaning yagona manbai — [`PLAN.md`](PLAN.md); bosqichlararo kelishuvlar —
 | M3 — Fayllar va obyektlar | bajarildi (yo'l siyosati, audit, rezolver, 7 ta tool) |
 | M4 — Simulyatsiya | bajarildi (job holat mashinasi, 6 ta simulyatsiya tooli, CSV eksport) |
 | M5 — Signallar va diagnostika | bajarildi (`vissim_set_signal_state`, `vissim_tail_log`, `vissim_exec_python`) |
-| **M6 — Haqiqiy Vissim'da tekshirish** | **to'xtatilgan**: kompyuterdagi yagona litsenziya — Demo (COM moduli yo'q). Hamma narsa tayyor: [`docs/m6-runbook.md`](docs/m6-runbook.md) |
-| M7 — Integratsiya va reliz | bajarildi: o'rnatuvchi, doctor, ro'yxatdan o'tkazish yordamchisi, misollar, hujjatlar. `v1.0.0` tegi M6 dan keyin qo'yiladi |
+| **M6 — Haqiqiy Vissim'da tekshirish** | **avtomatik qismi bajarildi** (2026-11-18, PTV Vissim Academic 2026 SP 10): COM nomlari tasdiqlandi, `tests/real` o'tdi, topilgan farqlar tuzatildi ([`docs/test-report-v1.md`](docs/test-report-v1.md)). Qo'lda bajariladigan C1–C3 qadamlar qolgan ([`docs/m6-runbook.md`](docs/m6-runbook.md), 4-bo'lim) |
+| M7 — Integratsiya va reliz | bajarildi: o'rnatuvchi, doctor, ro'yxatdan o'tkazish yordamchisi, misollar, hujjatlar. `v1.0.0` tegi M6 ning qo'lda qadamlaridan keyin qo'yiladi |
 
-Server versiyasi hozir `1.0.0rc1` (`src/vissim_mcp/__init__.py`).
+Server versiyasi hozir `1.0.0rc2` (`src/vissim_mcp/__init__.py`).
 
 ## Talablar
 
 | Talab | Izoh |
 |---|---|
 | Windows 10/11, interaktiv foydalanuvchi sessiyasi | Server Windows xizmati sifatida ishlamaydi |
-| PTV Vissim 2024+ (64-bit), **litsenziyada COM moduli** | Demo/Student litsenziyada COM **yo'q** — Vissim COM orqali ochilganda "License not found" oynasi chiqadi va `vissim_connect` `CO_E_SERVER_EXEC_FAILURE` bilan tugaydi. Bu kompyuterda hozir faqat Demo bor (Q2) |
+| PTV Vissim 2024+ (64-bit), **litsenziyada COM moduli** | Demo/Student litsenziyada COM **yo'q** — Vissim COM orqali ochilganda "License not found" oynasi chiqadi va `vissim_connect` `CO_E_SERVER_EXEC_FAILURE` bilan tugaydi. Bu kompyuterda Academic litsenziya bor (CodeMeter ro'yxatida "PTV Base License" nomi bilan, "PTV Vissim (Demo)" yonida) — u COM orqali ishlaydi (M6 da tasdiqlangan) |
 | Vissim COM server ro'yxatdan o'tgan | Vissim'ni administrator sifatida oching → Help → Register COM Server (bir marta) |
 | Litsenziya "default" qilib saqlangan | Vissim oddiy ochilganda litsenziya tanlash dialogi chiqmasligi kerak |
 | Python 3.12 (yoki 3.13 / 3.11), **64-bit**, `py` launcher bilan | python.org o'rnatuvchisi; o'rnatuvchi o'zi topadi |
@@ -97,8 +97,8 @@ O'rnatishdan keyin **yangi** Claude Code sessiyasini oching (yoki ochiq sessiyad
 
 - Server — oddiy stdio jarayon. Uni **Claude Code o'zi** har sessiya boshida ro'yxatdagi buyruq bo'yicha ishga
   tushiradi va sessiya tugaganda yopadi (stdin yopiladi, 300 ms dan keyin jarayon daraxti o'ldiriladi; server
-  ≤ 300 ms ichida chiqadi va o'zi ochgan Vissim'ni yopadi — soxta COM qatlami va stand-in jarayon bilan
-  tekshirilgan, haqiqiy Vissim bilan M6 da tasdiqlanadi). Windows xizmati, avtoyuklash yoki qo'lda ishga tushirish
+  ≤ 300 ms ichida chiqadi va o'zi ochgan Vissim'ni yopadi — haqiqiy Vissim bilan M6 da tasdiqlangan: chiqish
+  0,12 s). Windows xizmati, avtoyuklash yoki qo'lda ishga tushirish
   **kerak emas** — kompyuter qayta yoqilgandan keyin Claude Code ochilishi bilan server ishlaydi.
 - `user` scope yozuvi `~/.claude.json` da saqlanadi: istalgan papkada ishlaydi, loyiha tasdiqlash so'rovi chiqmaydi,
   qayta yoqishdan keyin ham saqlanadi. Desktop ilovasining Code yorlig'i ham aynan `~/.claude.json` ni afzal ko'radi.
@@ -158,7 +158,8 @@ qiymat — aniq xabar bilan chiqish kodi `2`. Joriy qiymatlarni `vissim_health` 
 | `VISSIM_SEED_ATTR` | `RandSeed` (*) | Tasodifiy urug' atributi |
 | `VISSIM_BREAK_DISABLE_VALUE` | `0` (*) | "To'xtash nuqtasi yo'q" qiymati (≥ 0) |
 
-(*) — haqiqiy Vissim'da hali tasdiqlanmagan ([`docs/com-names.md`](docs/com-names.md)); M6 da tekshiriladi.
+(*) — sozlanadigan nomlar; standart qiymatlari haqiqiy Vissim 2026 da tasdiqlangan (M6,
+[`docs/com-names.md`](docs/com-names.md)), boshqa Vissim versiyasida farq qilsa shu o'zgaruvchilar bilan o'zgartiriladi.
 
 Qoidalar: bo'sh qiymat = standart; mantiqiy qiymatlar `1/0`, `true/false`, `yes/no`, `on/off`; noma'lum `VISSIM_*`
 o'zgaruvchi (masalan, `VISSIM_ALLOWED_DIR`) — ogohlantirish va taklif. Qiymatni o'zgartirish: o'rnatuvchini faqat
@@ -176,8 +177,8 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
 3. `vissim_load_network` — `models\original\...inpx` ni yuklash (o'qish mumkin).
 4. `vissim_list_objects` / `vissim_get_attributes` — ma'lumotni o'qish; `vissim_set_attributes` `dry_run=true`
    bilan → tasdiq → yozish.
-5. `vissim_save_network` — yangi nomga saqlash (masalan `work\variant1.inpx`; mavjud fayl ustiga yozilsa,
-   avval `backups\` ga nusxa).
+5. `vissim_save_network` — yangi nomga saqlash (masalan `work\variant1.inpx`; papka hali bo'lmasa server uni
+   yaratadi; mavjud fayl ustiga yozilsa, avval `backups\` ga nusxa).
 6. `vissim_configure_simulation` → `vissim_start_simulation` (darhol `job_id`) → `vissim_wait_simulation`
    (takror, har biri ≤ 90 s) → `vissim_export_csv`.
 7. `vissim_close` — litsenziya seat'ini bo'shatish.
@@ -186,14 +187,14 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
 
 | Guruh | Tool | Vazifasi | Turi |
 |---|---|---|---|
-| Hayot sikli | `vissim_connect` | Yangi Vissim nusxasini COM orqali ochish (PID, Job Object) | yozuvchi |
+| Hayot sikli | `vissim_connect` | Yangi Vissim nusxasini COM orqali ochish (PID, Job Object); litsenziya dialogi yoki `CO_E_SERVER_EXEC_FAILURE` da yana 2 martagacha o'zi urinadi | yozuvchi |
 | | `vissim_health` | Server/ulanish holati, sozlamalar, versiya — COM'siz | o'qish |
 | | `vissim_info` | Asosiy kolleksiyalar soni, `SimPeriod`, `SimRes` | o'qish |
 | | `vissim_restart` | O'z Vissim'ini o'ldirib qayta ulanish (osilgan/qulagan holatda) | buzuvchi |
 | | `vissim_close` | `Exit()` → kutish → terminate/kill; saqlamaydi | buzuvchi |
 | Fayllar | `vissim_load_network` | `.inpx` (+ `.layx`) yuklash | yozuvchi |
 | | `vissim_save_network` | `.inpx` saqlash, zaxira nusxa, sha256, audit | yozuvchi |
-| Obyektlar | `vissim_describe` | Obyekt a'zolari (COM type info) | o'qish |
+| Obyektlar | `vissim_describe` | Obyekt a'zolari (COM type info); `include_attributes` — atributlar ro'yxati, `id` ustuni tilga bog'liq bo'lmagan nom (`code`/`name` Vissim interfeysi tilida) | o'qish |
 | | `vissim_list_objects` | Kolleksiya atributlari jadvali, sahifalab | o'qish |
 | | `vissim_get_attributes` | Bitta obyekt atributlari | o'qish |
 | | `vissim_set_attributes` | Atributlarni yozish (`dry_run`), audit | yozuvchi |
@@ -205,7 +206,7 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
 | | `vissim_resume_simulation` | Pauzadan davom ettirish | yozuvchi |
 | | `vissim_stop_simulation` | Keyingi bo'lak chegarasida to'xtatish | yozuvchi |
 | Natijalar | `vissim_export_csv` | Kolleksiya atributlarini CSV'ga (`;`, utf-8-sig), audit | yozuvchi |
-| Signallar | `vissim_set_signal_state` | Signal guruhi holati (job yo'q yoki pauzada), kontrollerga qaytarish | yozuvchi |
+| Signallar | `vissim_set_signal_state` | Signal guruhi holati (`pause_at` bilan pauza qilingan simulyatsiyada; simulyatsiyadan tashqarida Vissim o'zi rad etadi), kontrollerga qaytarish | yozuvchi |
 | Diagnostika | `vissim_tail_log` | Server log oxiri (≤ 500 qator) | o'qish |
 | | `vissim_exec_python` | Ixtiyoriy Python kodi — standart holatda **o'chiq** (`EXEC_DISABLED`) | buzuvchi |
 
@@ -235,8 +236,8 @@ Tavsiya etilgan sozlamalar (PLAN 9.2–9.3):
   qilinadi. `settings.json.example` uni Claude Code darajasida ham taqiqlaydi.
 - **Jarayonlar.** Server faqat o'zi COM orqali ochgan (`-Embedding`) va PID + ishga tushgan vaqt bilan tasdiqlangan
   Vissim'ni yopadi/o'ldiradi; siz o'zingiz ochgan Vissim oynasiga hech qachon tegmaydi. Server qanday tugamasin
-  (hatto o'ldirilsa ham), kill-on-close Job Object o'z Vissim'ini Windows orqali yopishi kerak — bu soxta qatlam va
-  stand-in jarayon bilan tekshirilgan, haqiqiy `Vissim260.exe -Embedding` bilan M6 da tasdiqlanadi. Job Object
+  (hatto o'ldirilsa ham), kill-on-close Job Object o'z Vissim'ini Windows orqali yopadi — bu haqiqiy
+  `Vissim260.exe -Embedding` bilan M6 da tasdiqlangan (server o'ldirilgandan keyin Vissim 1 s ichida yo'qoladi). Job Object
   biriktirilmasa (masalan, Vissim administrator sifatida ishlayotgan bo'lsa), `vissim_connect` ogohlantirish beradi
   (`job_object: false`) — u holda server o'ldirilsa Vissim qolishi mumkin. Yangi sessiyadagi server avvalgi
   sessiyadan qolgan Vissim'ni yopa olmaydi (`vissim_close`/`vissim_restart` faqat o'zi ochganini boshqaradi):
@@ -287,8 +288,10 @@ papkasidan (Claude Code u yerda ishlatadigan yozuv: `local` > `project` > `user`
 FAIL, faqat `project`/`local` scope bo'lsa — WARN, argumentlarda `-P` bo'lmasa — WARN. Parametrlar: `-RuntimeDir`,
 `-ProjectsDir` (Claude Code ochiladigan papka; standart — ro'yxatdagi `VISSIM_ALLOWED_DIRS` ning birinchisi, bo'lmasa
 `D:\VissimProjects`), `-ProgId` (server ro'yxatda bo'lmaganda taxmin qilinadigan qiymat), `-NoClaude`
-(`install.ps1 -NoRegister` dan keyin ro'yxat tekshiruvini o'tkazib yuborish), `-LogLines`. Hozir bu
-kompyuterda "Vissim license" qatori kutilgan holda FAIL (Demo).
+(`install.ps1 -NoRegister` dan keyin ro'yxat tekshiruvini o'tkazib yuborish), `-LogLines`. "Vissim license"
+qatori CodeMeter ro'yxatidagi PTV litsenziyalarini ko'rsatadi: faqat Demo/Student bo'lsa — FAIL; to'liq litsenziya
+"PTV Base License" nomi bilan ham kelishi mumkin (bu kompyuterda shunday) — PASS. Ro'yxatda COM moduli alohida
+ko'rinmaydi, haqiqiy tekshiruv — `vissim_connect`.
 
 `uninstall.ps1` parametrlari: `-Scope` (standart `user`), `-ProjectsDir` (`project`/`local` scope uchun —
 `.mcp.json` / yozuv joylashgan papka), `-RemoveRuntime`, `-RemoveData`, `-KeepRegistration`, `-DryRun`. Venv yoki
@@ -345,14 +348,19 @@ qaytaradi; `ToolAnnotations` (`readOnlyHint`, `destructiveHint`) qo'yilgan.
 
 ## Cheklovlar va ochiq masalalar
 
-- **M6 to'xtatilgan (Q2).** Kompyuterdagi yagona litsenziya — `PTV Vissim (Demo)`, COM moduli yo'q. Haqiqiy Vissim
-  bilan ishlash, PLAN 10.3 testlari va `docs/com-names.md` dagi (*) nomlarni tasdiqlash COM moduli bor litsenziya
-  (yoki PTV Hub obunasi) faollashtirilgandan keyin [`docs/m6-runbook.md`](docs/m6-runbook.md) bo'yicha bajariladi.
-  Shungacha `vissim_connect` litsenziya oynasini aniqlab, tushunarli `COM_ERROR` qaytaradi.
-- **`v1.0.0` tegi qo'yilmagan.** PLAN 10.4 qabul mezonlaridan "10.3 dagi 1–6 o'tkazilgan", "com-names yakunlangan"
-  va "sessiya yopilgandan keyin `Vissim*.exe` qolmaydi" (haqiqiy Vissim bilan) M6 ga bog'liq.
+- **M6 ning qo'lda qadamlari qolgan.** Avtomatik qism 2026-11-18 da PTV Vissim Academic 2026 (SP 10) bilan
+  o'tkazildi ([`docs/test-report-v1.md`](docs/test-report-v1.md)). Loyiha egasi bajaradigan uchta qadam qolgan
+  ([`docs/m6-runbook.md`](docs/m6-runbook.md), 4-bo'lim): C1 — Vissim'ni Task Manager'dan o'ldirish, C2 — "Save
+  changes?" dialogi (`TIMEOUT_HUNG`), C3 — Claude Code yopilganda Vissim qolmasligi.
+- **`v1.0.0` tegi qo'yilmagan** — yuqoridagi qo'lda qadamlardan keyin qo'yiladi (PLAN 10.4).
+- **Litsenziya dialogi vaqti-vaqti bilan chiqadi.** To'g'ri litsenziya bilan ham COM orqali ochilgan Vissim taxminan
+  har sakkizinchi ishga tushishda "Управление лицензиями" oynasini ko'rsatdi (M6 da kuzatilgan; sababi aniqlanmagan,
+  o'sha paytda boshqa Vissim oynalari ham ochiq edi). `vissim_connect`/`vissim_restart` bunday holatda o'zi yana
+  2 martagacha urinadi (natijada `attempts` va ogohlantirish); uchala urinish ham muvaffaqiyatsiz bo'lsa —
+  `COM_ERROR` ("3 start attempts").
 - **Q7 (ma'lumot siyosati) ochiq.** Yuridik bo'lim tasdig'igacha faqat test modellari.
-- Tasdiqlanmagan nomlar: `VISSIM_SEED_ATTR` (`RandSeed`), `VISSIM_BREAK_DISABLE_VALUE` (`0`) va boshqalar — sozlanadi.
+- COM nomlari faqat Vissim 2026 da tasdiqlangan; boshqa versiyada farq qilsa `VISSIM_SEED_ATTR`,
+  `VISSIM_BREAK_DISABLE_VALUE` bilan sozlanadi, qolganlari `scripts\probe_com_names.py` bilan tekshiriladi.
 - v1.0 doirasida: bitta Vissim nusxasi; foydalanuvchi ochgan oynaga ulanish (attach) yo'q; HTTP transport yo'q;
   Windows xizmati sifatida ishlamaydi.
 - Claude Code stdio serverlarni avtomatik qayta ulamaydi: qayta o'rnatish yoki server qulaganidan keyin `/mcp` →

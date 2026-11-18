@@ -168,7 +168,7 @@ def test_stale_break_does_not_break_a_job(
             "start_warnings": job.get("warnings"),
             "state": status["state"],
             "simsec": status["simsec"],
-            "warnings": status["warnings"],
+            "warnings": status.get("warnings", []),
             "error": status["error"],
         },
     )
@@ -182,7 +182,7 @@ def test_stale_break_does_not_break_a_job(
         stale_break_chunked={
             "start_warnings": job.get("warnings"),
             "state": status["state"],
-            "warnings": status["warnings"],
+            "warnings": status.get("warnings", []),
             "run_wall_s": status["run_wall_s"],
             "error": status["error"],
         }

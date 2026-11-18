@@ -98,6 +98,17 @@ _STARTUP_TIMEOUT_HINT = (
 )
 
 
+def _is_transient_start_failure(exc: VissimMcpError) -> bool:
+    """A failed start worth one more attempt: Vissim showed a license dialog (and that instance was closed)
+    or never registered with COM (``CO_E_SERVER_EXEC_FAILURE``). Without a COM license the second attempt
+    fails the same way; with one, such a failure is usually gone a few seconds later."""
+    if exc.code is not ErrorCode.COM_ERROR or not exc.details:
+        return False
+    if exc.details.get("window_titles") is not None:
+        return exc.details.get("killed") is True
+    return exc.details.get("hresult") == CO_E_SERVER_EXEC_FAILURE
+
+
 class SimulationJobHook(Protocol):
     """What the service needs from a simulation job (implemented by ``jobs.SimulationJob`` in M4)."""
 
@@ -236,6 +247,11 @@ class VissimService:
     process_poll_s = 0.1
     #: After RPC_S_CALL_FAILED the Vissim process may still be ending: watch it this long before deciding.
     call_failed_grace_s = 1.0
+    #: A start that fails the way a missing license does (license dialog, CO_E_SERVER_EXEC_FAILURE) is
+    #: repeated this many times: with a valid license about one start in eight failed like this for a while
+    #: (real Vissim 2026 with other Vissim instances open, M6), once twice in a row.
+    start_retries = 2
+    start_retry_delay_s = 5.0
 
     def __init__(
         self,
@@ -611,6 +627,50 @@ class VissimService:
         return chosen
 
     async def _connect_locked(
+        self, progid: str | None, *, prior_warnings: list[str] | None = None
+    ) -> dict[str, Any]:
+        """:meth:`_connect_once`, repeated after a transient start failure (``start_retries``)."""
+        warnings = list(prior_warnings or [])
+        attempt = 1
+        while True:
+            try:
+                result = await self._connect_once(progid, prior_warnings=warnings)
+            except VissimMcpError as exc:
+                if attempt > self.start_retries or not _is_transient_start_failure(exc):
+                    if attempt > 1:
+                        exc.message = f"{exc.message} ({attempt} start attempts)"
+                        if exc.details is not None:
+                            exc.details["attempts"] = attempt
+                    raise
+                note = (
+                    f"start attempt {attempt} failed ({_short(exc, 200)}); Vissim was started again after "
+                    f"{self.start_retry_delay_s:g} s"
+                )
+                log.warning("vissim_connect: %s", note)
+                warnings.append(note)
+                await self._wait_before_start_retry()
+                attempt += 1
+                continue
+            if attempt > 1:
+                result["attempts"] = attempt
+            return result
+
+    async def _wait_before_start_retry(self) -> None:
+        """Pause between two start attempts; restart, close and shutdown can still cancel the connect."""
+        self.connecting = True
+        try:
+            deadline = time.monotonic() + self.start_retry_delay_s
+            while True:
+                self._check_connect_abort()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                await asyncio.sleep(min(self.startup_poll_s, remaining))
+        finally:
+            self.connecting = False
+            self._connect_abort = None
+
+    async def _connect_once(
         self, progid: str | None, *, prior_warnings: list[str] | None = None
     ) -> dict[str, Any]:
         chosen = self._normalize_progid(progid)

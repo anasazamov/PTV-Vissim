@@ -25,7 +25,7 @@ def test_smoke_connect_load_simulate_close(
         pid=connected["pid"],
         job_object=connected["job_object"],
         elapsed_s=connected["elapsed_s"],
-        warnings=connected["warnings"],
+        warnings=connected.get("warnings", []),
     )
     assert connected["job_object"] is True, connected
 
@@ -37,7 +37,7 @@ def test_smoke_connect_load_simulate_close(
         counts=loaded["counts"],
         layout_loaded=loaded.get("layout_loaded"),
         elapsed_s=loaded["elapsed_s"],
-        warnings=loaded["warnings"],
+        warnings=loaded.get("warnings", []),
     )
     assert isinstance(links, int) and links > 0
 
@@ -54,7 +54,7 @@ def test_smoke_connect_load_simulate_close(
         state=status["state"],
         simsec=status["simsec"],
         run_wall_s=status["run_wall_s"],
-        warnings=status["warnings"],
+        warnings=status.get("warnings", []),
     )
     assert status["state"] == "finished", status
     assert status["percent"] == 100.0

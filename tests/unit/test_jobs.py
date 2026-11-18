@@ -91,7 +91,7 @@ def test_three_runs_use_distinct_precomputed_seeds(settings: Settings) -> None:
     vissim = make_vissim(300)
     job, data = start(vissim, settings, runs=3, seed=7, seed_increment=3)
     assert data["seeds"] == [7, 10, 13]
-    assert MULTI_RUN_WARNING in data["warnings"]
+    assert data["warnings"] == []  # Evaluation.KeepPrevResults is KeepAll: nothing to warn about
     assert vissim.simulation_attribute("RandSeed") == 7  # the first seed is applied at start
     percents = drive(job, vissim, settings)
     assert job.state is JobState.FINISHED and job.run == 3
@@ -609,3 +609,30 @@ def test_registry_keeps_the_current_and_the_last_jobs(settings: Settings) -> Non
         registry.get(ids[0])
     assert caught.value.code is ErrorCode.JOB_NOT_FOUND
     assert len(registry.jobs()) == HISTORY_SIZE + 1
+
+
+def test_multi_run_warning_depends_on_keep_prev_results(settings: Settings) -> None:
+    """Real Vissim returns the enum as "KEEPALL" (M6); the fake as 3. Only other values deserve a warning."""
+    vissim = make_vissim(300)
+    spec = vissim._evaluation._attrs["keepprevresults"]
+    spec.value = 1  # KeepNone
+    _job, data = start(vissim, settings, runs=2, seed=1)
+    (warning,) = data["warnings"]
+    assert warning.startswith("Evaluation.KeepPrevResults is 1: only the results of the last run remain")
+    assert "'KeepPrevResults': 'KEEPALL'" in warning
+
+    vissim = make_vissim(300)
+    spec = vissim._evaluation._attrs["keepprevresults"]
+    spec.vtype, spec.value, spec.minimum, spec.maximum = "str", "KEEPALL", None, None
+    _job, data = start(vissim, settings, runs=2, seed=1)
+    assert data["warnings"] == []
+
+    vissim = make_vissim(300)
+    del vissim._evaluation._attrs["keepprevresults"]  # cannot be read: the general warning
+    _job, data = start(vissim, settings, runs=2, seed=1)
+    assert data["warnings"] == [MULTI_RUN_WARNING]
+
+    vissim = make_vissim(300)
+    vissim._evaluation._attrs["keepprevresults"].value = 1
+    _job, data = start(vissim, settings, runs=1, seed=1)  # a single run: nothing to lose
+    assert data["warnings"] == []

@@ -2,8 +2,20 @@
 
 Bu hujjat PLAN.md 10.3-bo'lim (1–6-bandlar), 11-bo'lim M6 qatori va 13-bo'lim "M6" promptini **bitta sessiyada**
 bajarish uchun. Hamma narsa tayyorlab qo'yilgan: `scripts/probe_com_names.py`, `tests/real/*`,
-`docs/test-report-v1.md` shabloni. Hozir (2026-10-27) ishga tushirib bo'lmaydi: kompyuterdagi yagona litsenziya —
-**PTV Vissim (Demo)**, unda COM moduli yo'q (docs/preflight-report.md).
+`docs/test-report-v1.md`.
+
+**Holat (2026-11-18):** A va B qadamlar (probe va avtomatik testlar) PTV Vissim Academic 2026 (SP 10) bilan
+o'tkazildi, natijalar docs/test-report-v1.md da. **Qolgani — C qadam (4-bo'lim): C1, C2, C3** — ularni loyiha egasi
+o'zi bajaradi. 2026-10-27 gacha kompyuterda faqat **PTV Vissim (Demo)** bor edi (COM moduli yo'q,
+docs/preflight-report.md).
+
+Ikki amaliy eslatma (M6 tajribasidan):
+
+- Sinov paytida o'zingizning Vissim oynalaringiz ochiq tursa ham testlar ishlaydi (Academic litsenziya bir nechta
+  nusxaga ruxsat berdi), lekin COM orqali ochilgan nusxa vaqti-vaqti bilan litsenziya dialogini ko'rsatadi; server
+  o'zi qayta urinadi. Test baribir "license dialog ... (3 start attempts)" bilan yiqilsa — o'sha testni qayta ishga
+  tushiring, bu kod xatosi emas.
+- `scripts\doctor.ps1` da "Vissim license" qatori endi "PTV Base License" ni ham taniydi.
 
 Taxminiy vaqt: tayyorgarlik 15 daqiqa, probe 5–10 daqiqa, avtomatik testlar 30–90 daqiqa (eng uzuni — 5 × 3600 s
 stress testi), qo'lda bajariladigan qadamlar 15 daqiqa, natijalarni yozish 30 daqiqa.

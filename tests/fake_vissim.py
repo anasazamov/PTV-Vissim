@@ -715,6 +715,10 @@ NET_COLLECTIONS = (
 _NOT_SAVED = frozenset({"SimulationRuns", "Vehicles"})
 
 
+#: Prefix of the "translated" attribute short and long names of the fake (they are not identifiers).
+LOCALIZED_MARK = "~"
+
+
 class FakeAttributeInfo(FakeComObject):
     """``IAttribute``: description of one attribute of a collection's objects."""
 
@@ -727,12 +731,19 @@ class FakeAttributeInfo(FakeComObject):
         self._editable = editable
 
     @com_property
+    def ID(self) -> str:
+        """The language-independent identifier (real Vissim: upper case, accepted by AttValue)."""
+        return self._code.upper()
+
+    @com_property
     def Code(self) -> str:
-        return self._code
+        """The short name in the user interface language (real Vissim, Russian UI: "№" for "No") - not an
+        attribute identifier."""
+        return f"{LOCALIZED_MARK}{self._code}"
 
     @com_property
     def Name(self) -> str:
-        return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", self._code)
+        return LOCALIZED_MARK + re.sub(r"(?<=[a-z])(?=[A-Z])", " ", self._code)
 
     @com_property
     def ValueType(self) -> str:

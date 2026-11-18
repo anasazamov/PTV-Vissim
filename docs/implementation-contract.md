@@ -12,9 +12,12 @@ PLAN.md and report the conflict. Items marked EXTENSION are additive features in
   psutil, pytest, pytest-asyncio, ruff). Never upgrade mcp to 2.x (PLAN pins `mcp>=1.10,<2`).
 - The console code page is cp1251: ALWAYS run Python with `-X utf8` and set `PYTHONUTF8=1` for subprocesses. Use explicit
   `encoding="utf-8"` for every file opened in code.
-- **Never start real Vissim, never call real COM Dispatch, never kill or touch any Vissim*.exe process.** The owner keeps
-  an interactive `Vissim260.exe` open. The only license on this PC is a Demo license without the COM module (see
-  docs/preflight-report.md). All tests use fakes; `tests/conftest.py` shadows pywin32 with `tests/fakes` and sets
+- **Never start real Vissim, never call real COM Dispatch, never kill or touch any Vissim*.exe process — unless the
+  owner explicitly asks for a real-Vissim run** (then only through `tests/real`, `scripts/probe_com_names.py` or the
+  `vissim_*` tools, which touch only the instances they started). The owner keeps an interactive `Vissim260.exe`
+  open. Since 2026-11 this PC has an Academic license that works through COM (CodeMeter lists it as "PTV Base
+  License" next to "PTV Vissim (Demo)"); M0–M5 were built with the Demo license only (docs/preflight-report.md).
+  All default tests use fakes; `tests/conftest.py` shadows pywin32 with `tests/fakes` and sets
   `VISSIM_MCP_FORBID_REAL=1`. Protocol tests set `VISSIM_EXE_PATTERN` to a name no real program has.
 - Do not modify global config (git config, `~/.claude.json`, `~/.claude/settings.json`), do not run
   `claude mcp add/remove`, do not push, do not tag. Do not commit the untracked `.claude/` directory.
@@ -26,6 +29,12 @@ PLAN.md and report the conflict. Items marked EXTENSION are additive features in
 
 - Vissim 2026 (2026.0.10.0), `C:\Program Files\PTV Vision\PTV Vissim 2026\Exe\Vissim260.exe`; COM-launched instances
   have the command line `"...\Vissim260.exe" -Embedding`. ProgIDs `Vissim.Vissim`, `Vissim.Vissim.2026`, ... (one CLSID).
+- Facts established in M6 with real Vissim (docs/test-report-v1.md): boolean attributes arrive as the integers 1/0
+  and enums as upper-case strings (`KeepPrevResults` = "KEEPALL"); `SetAttValue` is pywin32's spelling of the
+  `AttValue` property put (it is not in the type library); `IAttribute.ID` is the language-independent attribute
+  identifier while `Code`/`Name` are in the UI language; outside a simulation run `SigState`/`ContrByCOM` read as
+  empty and cannot be written; after a run ended `SimSec` is 0 and `IsRunning` is 0; setting `SimBreakAt` sets
+  `IsSimBreakAtActive` by itself; the license dialog also shows up now and then with a valid license (connect retries).
 - With the Demo license a COM-launched Vissim shows the window `Управление лицензиями - PTV Vissim` ("License not found");
   `Dispatch` fails after 30-120 s with `com_error(-2146959355 /*CO_E_SERVER_EXEC_FAILURE*/, <Russian text>, None, None)`.
   COM error texts are localized — classify by HRESULT only.

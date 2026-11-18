@@ -209,3 +209,40 @@ async def test_worker_side_check_catches_a_resumed_job(
     result = await call(mcp, "vissim_set_signal_state", {"sc_no": 1, "sg_no": 1, "state": "GREEN"})
     assert result["error"]["code"] == "JOB_RUNNING" and calls["n"] == 2
     assert h.vissim.attribute(SGS, 1, "SigState") == "RED"
+
+
+def test_boolean_attributes_arrive_as_integers_from_real_vissim() -> None:
+    """Real Vissim returns ContrByCOM as 1 / 0 (M6); the tool reports true / false."""
+
+    class Group:
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+        def AttValue(self, name: str) -> Any:
+            return self.value
+
+    errors: dict[str, str] = {}
+    assert signals._read_flag(Group(1), "ContrByCOM", errors) is True
+    assert signals._read_flag(Group(0), "ContrByCOM", errors) is False
+    assert signals._read_flag(Group(True), "ContrByCOM", errors) is True
+    assert signals._read_flag(Group(None), "ContrByCOM", errors) is None
+    assert signals._read_flag(Group(7), "ContrByCOM", errors) == 7
+    assert errors == {}
+
+
+async def test_no_simulation_run_in_progress_is_explained(
+    harness: MakeHarness, isolated_env: dict[str, Path]
+) -> None:
+    """Real Vissim outside a run (M6): SigState reads as empty and neither attribute can be written."""
+    h, mcp = await connected(harness)
+    group = h.vissim.collection(SGS)._find(1)
+    for key in ("sigstate", "contrbycom"):
+        group._attrs[key].value = None
+        group._attrs[key].editable = False
+    for arguments in ({"state": "GREEN"}, {"release_to_controller": True}):
+        result = await call(mcp, "vissim_set_signal_state", {"sc_no": 1, "sg_no": 1, **arguments})
+        assert result["error"]["code"] == "COM_ERROR", result
+        assert result["error"]["hint"] == signals.NO_SIMULATION_HINT
+        assert "pause_at" in result["error"]["hint"]
+    records = audit_records(isolated_env["audit"], "vissim_set_signal_state")
+    assert [r["old"] for r in records] == [{"SigState": None, "ContrByCOM": None}] * 2

@@ -43,7 +43,11 @@ log'ida DCOM 10010.
 
 **Sababi:** COM orqali ochilgan Vissim litsenziya topa olmadi:
 
-- litsenziyada **COM moduli yo'q** (Demo/Student — bu kompyuterda hozir aynan shunday, PLAN Q2);
+- litsenziyada **COM moduli yo'q** (Demo/Student);
+- **vaqtinchalik holat**: to'g'ri litsenziya bilan ham bu oyna taxminan har sakkizinchi ishga tushishda chiqdi
+  (M6, 2026-11-18; boshqa Vissim oynalari ochiq edi). Shuning uchun `vissim_connect` va `vissim_restart` bunday
+  xatodan keyin o'zi yana 2 martagacha urinadi; javobda `attempts` > 1 va "start attempt 1 failed ..." ogohlantirishi
+  bo'lsa — hech narsa qilish shart emas. Xabar "(3 start attempts)" bilan tugasa — pastdagi qadamlarga o'ting;
 - litsenziya "default" qilib saqlanmagan, Vissim ishga tushishda tanlash dialogini ko'rsatadi;
 - bitta o'rinli litsenziyani siz ochgan Vissim oynasi band qilib turibdi;
 - CodeMeter xizmati ishlamayapti (7-bo'lim).
@@ -107,7 +111,7 @@ qaytadan `vissim_start_simulation`. `RPC_S_CALL_FAILED` (`-2147023170`) — javo
 | `READ_ONLY_PATH` | `models\original` (yoki `VISSIM_READONLY_DIRS`) ichiga yozish/saqlash | Boshqa nomga, masalan `D:\VissimProjects\work\` ga saqlang. Asl modellar ataylab himoyalangan |
 | `ATTRIBUTE_DENIED` | Nomida File/Path/Folder/Dir bo'lgan atributni yozish | Fayl siyosatini chetlab o'tishdan himoya. Haqiqatan kerak bo'lsa (test kompyuterida): `-ExtraEnv 'VISSIM_ALLOW_PATH_ATTRS=1'` |
 | `INVALID_ARGUMENT` (kengaytma) | Yuklash faqat `.inpx`/`.layx`, saqlash `.inpx`, eksport `.csv` | To'g'ri kengaytma bering |
-| `FILE_NOT_FOUND` | Fayl yo'q | Yo'lni tekshiring; nisbiy yo'l birinchi ruxsat etilgan ildizga nisbatan ochiladi |
+| `FILE_NOT_FOUND` | Yuklanadigan fayl yo'q; yoki saqlash/eksport papkasini yaratib bo'lmadi | Yo'lni tekshiring; nisbiy yo'l birinchi ruxsat etilgan ildizga nisbatan ochiladi. `vissim_save_network` va `vissim_export_csv` ruxsat etilgan ildiz ichida yo'q papkani o'zi yaratadi (javobda `created_folder`); yarata olmasa — shu nomda fayl bor yoki yozish huquqi yo'q |
 
 ## 6. `/mcp` da server yo'q yoki "failed"
 
@@ -173,7 +177,9 @@ bering: `%LOCALAPPDATA%\vissim-mcp\` (venv, logs, audit), `C:\Program Files\PTV 
 Server UTF-8 bilan ishlaydi (`-X utf8`, `PYTHONUTF8=1`), lekin Vissim'ning o'zi kirill/o'zbekcha belgili
 (`ko'cha`, `Йўл`) yo'llarni har doim ham o'qiy olmaydi. Bunday yo'lda server ogohlantiradi: "non-ASCII path; if
 Vissim fails to read it, move the project to an ASCII path". Vissim fayl ochmasa yoki `COM_ERROR` bersa — loyihani
-ASCII nomli papkaga ko'chiring (masalan `D:\VissimProjects\samarqand_kocha\`). Foydalanuvchi nomi kirillcha
+ASCII nomli papkaga ko'chiring (masalan `D:\VissimProjects\samarqand_kocha\`). Vissim 2026 da
+`Samarqand_ko'cha_Самарқанд\tarmoq_ўзбек.inpx` yo'li bilan yuklash, saqlash va CSV eksport muammosiz ishladi
+(M6, 2026-11-18) — ogohlantirish shunchaki eslatma. Foydalanuvchi nomi kirillcha
 bo'lsa ham `%LOCALAPPDATA%` dagi venv ishlaydi; muammo bo'lsa `install.ps1 -RuntimeDir C:\vissim-mcp\venv`.
 
 ## 11. Log'lar qayerda

@@ -276,7 +276,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         Parameters: runs (1..1000, default 1); seed (>= 1); seed_increment (>= 1, default 1); chunk_sim_s
         (default VISSIM_CHUNK_SIM_S); pause_at - simulation seconds strictly between 0 and the period.
         Returns: job_id, state, period, runs, seeds (one per run; null = Vissim's current seed), chunk,
-        pause_at, warnings (e.g. "ensure evaluation keeps previous runs" for runs > 1).
+        pause_at, warnings (e.g. for runs > 1 when Evaluation.KeepPrevResults does not keep every run).
         Errors: JOB_RUNNING, INVALID_ARGUMENT (bad values, SimPeriod <= 0, "seed required for runs>1"),
         NOT_CONNECTED, COM_ERROR, TIMEOUT_HUNG.
 

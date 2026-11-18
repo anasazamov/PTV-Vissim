@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import re
 import sys
 import threading
 import time
@@ -28,6 +29,8 @@ LOG_FORMAT = "%(asctime)s %(process)d %(threadName)s %(levelname)s %(name)s: %(m
 MAX_BYTES = 5_000_000
 BACKUP_COUNT = 5
 _MARKER = "_vissim_mcp_handler"
+
+_INPUT_VALUE_RE = re.compile(r"input_value='([^']{1,80})'")
 
 _state_lock = threading.Lock()
 _saved_root_level: int | None = None
@@ -73,6 +76,32 @@ class SafeStreamHandler(logging.StreamHandler):  # type: ignore[type-arg]
 
     def handleError(self, record: logging.LogRecord) -> None:
         pass
+
+
+class CompactValidationNoise(logging.Filter):
+    """Shorten the MCP SDK's "Failed to validate request" warning to one line.
+
+    A client may send a request this SDK version does not know (Claude Code sends ``server/discover``); the
+    SDK answers it correctly with an error but logs every pydantic validation error of every request type -
+    about a hundred lines per session start, which pushed the useful lines out of ``vissim_tail_log``.
+    """
+
+    PREFIX = "Failed to validate request"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        if message.startswith(self.PREFIX) and "\n" in message:
+            method = _INPUT_VALUE_RE.search(message)
+            what = f" (unknown method {method.group(1)!r})" if method else ""
+            record.msg = (
+                f"the client sent a request this MCP SDK version does not support{what}; it was refused"
+            )
+            record.args = None
+            record.levelno, record.levelname = logging.INFO, "INFO"
+        return True
 
 
 def log_file_path(settings: Settings) -> Path:
@@ -157,6 +186,7 @@ def _install(
 ) -> None:
     handler.setLevel(level)
     handler.setFormatter(formatter)
+    handler.addFilter(CompactValidationNoise())
     setattr(handler, _MARKER, True)
     root.addHandler(handler)
 

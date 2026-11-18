@@ -88,7 +88,7 @@ async def test_start_wait_finished(harness: MakeHarness, isolated_env: dict[str,
     started = await call(mcp, "vissim_start_simulation", {"runs": 3, "seed": 21, "seed_increment": 2})
     assert started["ok"] is True and started["state"] == "running"
     assert started["seeds"] == [21, 23, 25] and started["period"] == 300 and started["runs"] == 3
-    assert any(w.startswith("ensure evaluation keeps previous runs") for w in started["warnings"])
+    assert "warnings" not in started  # Evaluation.KeepPrevResults keeps every run
     status = await wait_until_done(mcp, started["job_id"])
     assert status["state"] == "finished" and status["percent"] == 100.0 and status["run"] == 3
     assert status["job_id"] == started["job_id"] and "waited_s" in status

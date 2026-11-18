@@ -90,6 +90,10 @@ MULTI_RUN_WARNING = (
     "ensure evaluation keeps previous runs (Evaluation attribute KeepPrevResults, docs/com-names.md); "
     "otherwise only the results of the last run remain"
 )
+KEEP_RESULTS_ATTR = "KeepPrevResults"
+#: ``Evaluation.KeepPrevResults`` values that keep the results of every run: real Vissim 2026 returns the
+#: enum as the string "KEEPALL"; 3 is its number (KeepPreviousResults.KeepAll).
+KEEP_ALL_VALUES = frozenset({"KEEPALL", "3"})
 STALE_BREAK_WARNING = (
     "the simulation paused before the requested break point (an old SimBreakAt or a break set in Vissim); "
     "the job continued from there"
@@ -615,6 +619,19 @@ def _read_step(simulation: Any) -> float | None:
     return 1.0 / resolution
 
 
+def _read_keep_results(vissim: Any) -> str | None:
+    """``Evaluation.KeepPrevResults`` as text, None when it cannot be read (the caller then warns)."""
+    try:
+        value = vissim.Evaluation.AttValue(KEEP_RESULTS_ATTR)
+    except Exception as exc:
+        if is_connection_error(exc) or not is_com_error(exc):
+            raise
+        log.info("reading Evaluation.%s failed: %s", KEEP_RESULTS_ATTR, exc)
+        return None
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
 def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings, ctx: Any) -> dict[str, Any]:
     """COM task of ``vissim_start_simulation`` (worker thread): validate against Vissim, apply the first seed,
     create and register the job. Returns its snapshot plus ``chunk``.
@@ -667,7 +684,15 @@ def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings
     if seeds[0] is not None:
         simulation.SetAttValue(settings.seed_attr, seeds[0])
     if request.runs > 1:
-        warnings.append(MULTI_RUN_WARNING)
+        keep = _read_keep_results(ctx.vissim)
+        if keep is None:
+            warnings.append(MULTI_RUN_WARNING)
+        elif keep.upper() not in KEEP_ALL_VALUES:
+            warnings.append(
+                f"Evaluation.{KEEP_RESULTS_ATTR} is {keep}: only the results of the last run remain. To keep "
+                f"every run, stop this job and set it first: vissim_set_attributes(path='Evaluation', "
+                f"values={{'{KEEP_RESULTS_ATTR}': 'KEEPALL'}})"
+            )
     job = SimulationJob(
         job_id=new_job_id(),
         generation=ctx.generation,

@@ -63,6 +63,7 @@ def fast_timings(service: VissimService) -> VissimService:
     service.close_kill_wait_s = 0.5
     service.restart_kill_wait_s = 0.5
     service.call_failed_grace_s = 0.2
+    service.start_retry_delay_s = 0.02
     return service
 
 

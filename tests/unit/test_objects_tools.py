@@ -94,9 +94,14 @@ async def test_describe_members(setup: tuple[Harness, FastMCP]) -> None:
 async def test_describe_with_attributes(setup: tuple[Harness, FastMCP]) -> None:
     _h, mcp = setup
     payload = await call(mcp, "vissim_describe", {"path": "Net.Links", "include_attributes": True})
-    attributes = {row["code"]: row for row in payload["attributes"]}
-    assert attributes["NumLanes"]["editable"] is True and attributes["No"]["editable"] is False
-    assert attributes["NumLanes"]["value_type"] == "Integer" and attributes["NumLanes"]["name"]
+    attributes = {row["id"]: row for row in payload["attributes"]}
+    assert attributes["NUMLANES"]["editable"] is True and attributes["NO"]["editable"] is False
+    assert attributes["NUMLANES"]["value_type"] == "Integer"
+    # code and name are in the user interface language; only id is an attribute identifier
+    assert attributes["NUMLANES"]["code"] == "~NumLanes" and attributes["NUMLANES"]["name"] == "~Num Lanes"
+    ids = [row["id"] for row in payload["attributes"]][:5]
+    read = await call(mcp, "vissim_get_attributes", {"path": "Net.Links[1]", "attributes": ids})
+    assert read["ok"] is True and read["errors"] == {} and list(read["values"]) == ids
     assert payload["attributes_total"] == len(payload["attributes"])
     assert payload["attributes_truncated"] is False
 

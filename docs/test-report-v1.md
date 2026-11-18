@@ -4,127 +4,129 @@ PLAN.md 10.4 qabul mezoni: "10.3 dagi 1–6 qo'lda o'tkazilgan, natijalar `docs/
 10.3 bandi uchun bitta bo'lim va M1–M5 avtomatik testlari natijalarini o'z ichiga oladi. M6 ni o'tkazish tartibi:
 docs/m6-runbook.md.
 
-- Hisobot shabloni tayyorlangan sana: **2026-10-27**
+- M6 o'tkazilgan sana: **2026-11-18** (hisobot shabloni: 2026-10-27)
 - Kompyuter: `DESKTOP-88D92K2`, Windows 11 Pro 10.0.26200 (rus lokali, ANSI kod sahifasi 1251)
-- Vissim: PTV Vissim 2026 (2026.0.10.0), `C:\Program Files\PTV Vision\PTV Vissim 2026\Exe\Vissim260.exe`
-- Python 3.12.10 64-bit (`D:\PTV-Vissim\.venv`), mcp 1.30.0, pywin32 312
-- Litsenziya: faqat **PTV Vissim (Demo)** — COM moduli yo'q (docs/preflight-report.md)
+- Vissim: **PTV Vissim Academic 2026 (SP 10)**, `C:\Program Files\PTV Vision\PTV Vissim 2026\Exe\Vissim260.exe`,
+  interfeys tili — ruscha
+- Python 3.12.10 64-bit (`D:\PTV-Vissim\.venv`), mcp 1.30.0, pywin32 312; server `1.0.0rc2`
+- Litsenziya: Academic — CodeMeter ro'yxatida `PTV Base License (UFC 6000459)` (yonida `PTV Vissim (Demo)`); COM
+  orqali ishlaydi. Sinov paytida loyiha egasining 2–3 ta interaktiv Vissim oynasi ham ochiq edi — ularga tegilmadi.
+- Model: `Examples Training\COM\Basic Commands\COM Basic Commands.inpx` ning vaqtinchalik nusxasi
 
 ## Umumiy holat
 
-| 10.3 bandi | Holat | Sana | Tayyor vosita |
+| 10.3 bandi | Holat | Sana | Vosita |
 |---|---|---|---|
-| 1. Smoke | BLOCKED: COM litsenziyasi yo'q (Demo) | 2026-10-27 | `tests/real/test_real_smoke.py` |
-| 2. Nomlarni tasdiqlash | BLOCKED: COM litsenziyasi yo'q (Demo) | 2026-10-27 | `scripts/probe_com_names.py`, `tests/real/test_real_com_names.py` |
-| 3. Break semantikasi | BLOCKED: COM litsenziyasi yo'q (Demo) | 2026-10-27 | `tests/real/test_real_break_semantics.py` |
-| 4. Stress | BLOCKED: COM litsenziyasi yo'q (Demo) | 2026-10-27 | `tests/real/test_real_stress.py` |
-| 5. Nosozlik | BLOCKED: COM litsenziyasi yo'q (Demo) | 2026-10-27 | `tests/real/test_real_failures.py` + qo'lda qadamlar |
-| 6. Kodirovka | BLOCKED: COM litsenziyasi yo'q (Demo) | 2026-10-27 | `tests/real/test_real_encoding.py` |
+| 1. Smoke | PASSED | 2026-11-18 | `tests/real/test_real_smoke.py` |
+| 2. Nomlarni tasdiqlash | PASSED — 32 ta nom `verified`, 0 `rejected` | 2026-11-18 | `scripts/probe_com_names.py --update`, `tests/real/test_real_com_names.py` |
+| 3. Break semantikasi | PASSED (3 ta test; bitta kod xatosi topildi va tuzatildi) | 2026-11-18 | `tests/real/test_real_break_semantics.py` |
+| 4. Stress | PASSED (2 ta test) | 2026-11-18 | `tests/real/test_real_stress.py` |
+| 5. Nosozlik | PASSED avtomatik qismi (3 ta test); **qo'lda C1, C2, C3 o'tkazilmagan** | 2026-11-18 | `tests/real/test_real_failures.py` + qo'lda qadamlar |
+| 6. Kodirovka | PASSED | 2026-11-18 | `tests/real/test_real_encoding.py` |
 
-### Bloklanish dalili (M0, 2026-10-16)
-
-Barcha 6 band uchun umumiy (docs/preflight-report.md):
-
-- CodeMeter'dagi yagona Vissim litsenziyasi — `PTV Vissim (Demo)` (FC 6000459, PC 20000, 1 o'rin); Demo litsenziyada
-  COM moduli bo'lmaydi.
-- `scripts/com_smoke.py` (`Dispatch → Net.Links.Count → Exit`): COM orqali ochilgan nusxa
-  (`Vissim260.exe -Embedding`) "Управление лицензиями – PTV Vissim" oynasini ko'rsatdi ("Лицензия не найдена");
-  `Dispatch` 75–120 s dan keyin `CO_E_SERVER_EXEC_FAILURE` (0x80080005, −2146959355) bilan tugadi; Windows System
-  log'ida DCOM 10010.
-- Demo litsenziya bilan haqiqiy Vissim'da bitta ham COM chaqiruvi bajarilmagan, shuning uchun 10.3 bandlarining
-  birortasini o'tkazib bo'lmaydi. Server ishga tushishi va litsenziya dialogini aniqlash mantig'i soxta (fake)
-  qatlam bilan tekshirilgan (pastda).
-
-### Haqiqiy test to'plamining holati (2026-10-27)
+Yakuniy ishga tushirish (barcha tuzatishlardan keyin):
 
 ```text
-> python -X utf8 -m pytest -p no:cacheprovider tests\real -m vissim --collect-only -q
-12 tests collected
-> python -X utf8 -m pytest -p no:cacheprovider tests\real -m vissim -q -rs
-12 skipped  (sabab: "real Vissim test: needs --vissim-com-license ...")
-> python -X utf8 scripts\probe_com_names.py
-refused: ... confirm that with --i-have-a-com-license   (chiqish kodi 2)
+> python -X utf8 -m pytest -p no:cacheprovider tests\real -m vissim --vissim-com-license -rA --vissim-results docs\m6-real-results.jsonl
+11 passed, 1 skipped in 570.82s (0:09:30)
+SKIPPED: test_modal_dialog_gives_timeout_hung_and_restart_recovers (qo'lda qadam, --vissim-manual -s kerak)
+> python -X utf8 scripts\probe_com_names.py --i-have-a-com-license --update
+chiqish kodi 0; 32 ta nom verified
+> python -X utf8 -m pytest -p no:cacheprovider -q        (soxta COM qatlami)
+981 passed, 1 skipped, 12 deselected; ruff toza
 ```
 
-Standart `pytest` ishga tushirishda `tests/real` testlari `deselected` (12 ta) bo'ladi va pytest jarayoniga haqiqiy
-pywin32 yuklanmaydi (`tests/unit/test_real_suite_wiring.py` buni tekshiradi).
+Kuzatuvlar (har bir test yozgan qiymatlar): `docs/m6-real-results.jsonl`.
+
+### M6 da topilgan va tuzatilgan kamchiliklar
+
+| # | Topilma (haqiqiy Vissim'da) | Tuzatish |
+|---|---|---|
+| 1 | `vissim_set_signal_state`: Vissim `ContrByCOM` ni `1/0` qaytaradi, server `True` kutgan — har safar yolg'on ogohlantirish ("ContrByCOM read back as 1 ... the signal controller may override the state"), natijada `ContrByCOM: 1` | `tools/signals.py`: qiymat `true/false` ga aylantiriladi, ogohlantirish faqat haqiqiy farqda |
+| 2 | Simulyatsiyadan tashqarida `SigState`/`ContrByCOM` bo'sh o'qiladi va yozib bo'lmaydi; server buni umumiy "signal nomini tekshiring" maslahati bilan qaytargan | Aniq maslahat: `pause_at` bilan pauza → holatni yozish → `vissim_resume_simulation`; tool tavsifi tuzatildi |
+| 3 | `vissim_describe(include_attributes=true)`: `code` ustuni interfeys tilida (`№`, `Имя`) — bunday nom bilan `AttValue` xato beradi, ya'ni ro'yxat amalda yaroqsiz edi | Har bir atribut uchun `id` (`IAttribute.ID`: `NO`, `NAME`, ...) qaytariladi; tavsifda `id` ishlatilishi aytilgan |
+| 4 | COM orqali ochilgan Vissim to'g'ri litsenziya bilan ham vaqti-vaqti bilan (taxminan har 8 ishga tushishdan birida) litsenziya dialogini ko'rsatdi yoki `CO_E_SERVER_EXEC_FAILURE` berdi; `vissim_connect`/`vissim_restart` darhol xato qaytargan | `service.py`: bunday xatodan keyin 5 s kutib yana 2 martagacha urinish; natijada `attempts` va ogohlantirish; `vissim_close`/`vissim_restart` kutishni bekor qila oladi. Sababi aniqlanmagan (o'sha paytda boshqa Vissim oynalari ochiq edi); 14 ta ketma-ket "yop → darhol och" tajribasida takrorlanmadi |
+| 5 | `vissim_save_network(save_as="work\variant1.inpx")` va `vissim_export_csv` papka bo'lmasa `FILE_NOT_FOUND` — README'dagi odatiy birinchi qadam ishlamagan, Claude'da papka yaratadigan tool yo'q | Ruxsat etilgan ildiz ichida yo'q papka yaratiladi (`created_folder`, auditga yoziladi); faqat-o'qish va tashqi yo'llar avvalgidek rad etiladi |
+| 6 | `vissim_start_simulation(runs>1)`: `KeepPrevResults` allaqachon `KEEPALL` bo'lsa ham "ensure evaluation keeps previous runs" ogohlantirishi chiqqan | Qiymat o'qiladi: `KEEPALL`/`3` da ogohlantirish yo'q; boshqa qiymatda aniq ko'rsatma bilan ogohlantirish |
+| 7 | `scripts/doctor.ps1`: to'liq litsenziya CodeMeter'da "PTV Base License" deb nomlangani uchun "only PTV Vissim (Demo) - no COM module" FAIL chiqqan | PTV litsenziyalari ham hisobga olinadi; Demo/Student bo'lmagani bor bo'lsa PASS |
+| 8 | Server log'i: Claude Code yuboradigan `server/discover` so'rovi uchun mcp SDK har sessiyada ~100 qator pydantic xatosini yozgan (`vissim_tail_log` foydasiz bo'lib qolgan) | `logging_setup.py`: bunday yozuv bitta INFO qatorga qisqartiriladi |
+| 9 | `tests/real`: testlar `warnings` kaliti har doim bor deb kutgan (bo'sh bo'lsa server uni qo'shmaydi) — 2 ta test `KeyError` bilan yiqilgan | `.get("warnings", [])` |
+| 10 | `probe_com_names.py`: type info'dan `SetAttValue` ni kutgan — u type library'da yo'q (pywin32 ning `AttValue` ga yozish nomi) | Kutilma: `AttValue` `property_get` + `property_put`; `IAttribute.ID` ham tekshiriladi |
+
+Soxta COM qatlami (`tests/fake_vissim.py`) haqiqiy xatti-harakatga yaqinlashtirildi: `IAttribute.ID` qo'shildi,
+`Code`/`Name` "tarjima qilingan" (identifikator emas).
+
+Kodni o'zgartirishni talab qilmagan natijalar: `VISSIM_BREAK_DISABLE_VALUE=0` va `VISSIM_SEED_ATTR=RandSeed` to'g'ri;
+`IsSimBreakAtActive` ni yozish kerak emas (`SimBreakAt` yozilganda o'zi yoqiladi); `ItemByKey("1")` ishlaydi; Job Object
+flag'lari yetarli; `Exit()` 3,7–6 s da toza yopadi.
+
+### Ochiq qolganlar
+
+- **Qo'lda qadamlar C1, C2, C3** (docs/m6-runbook.md, 4-bo'lim) o'tkazilmagan: ular loyiha egasining harakatini talab
+  qiladi (Task Manager, Vissim oynasidagi "Save changes?" dialogi, Claude Code'ni yopish). C1 va C3 ning avtomatik
+  ekvivalentlari o'tdi; C2 (`TIMEOUT_HUNG` modal dialogda) haqiqiy Vissim'da **tekshirilmagan**.
+- Litsenziya dialogining sababi aniqlanmagan (4-topilma) — faqat qayta urinish bilan yumshatilgan.
+- Probe'dagi `stale_break` tajribasi natijani `paused_at_0.0` deb yozadi; aslida run oxirigacha borgan (`SimSec=0`,
+  `IsRunning=0`). Bu faqat probe hisobotidagi yorliq, serverga ta'sir qilmaydi.
+- Faqat bitta model (`COM Basic Commands`, 34 ta havola) va bitta Vissim versiyasi/tili bilan sinalgan.
 
 ---
 
 ## 1. Smoke (PLAN 10.3, 1-band)
 
-- **Holat:** BLOCKED: COM litsenziyasi yo'q (Demo) — 2026-10-27
-- **Dalil:** M0 bloklanish dalili (yuqorida).
-- **Test:** `tests/real/test_real_smoke.py::test_smoke_connect_load_simulate_close` — connect → `COM Basic Commands`
-  nusxasini yuklash → `Links.Count` → 60 s simulyatsiya → `vissim_close`; jarayon qolmasligi tekshiriladi.
-- **Kutilgan natija:** `PASSED`; `job_object: true`; close usuli `exit`.
-- **Natija:** _(M6 sessiyasida to'ldiriladi: sana, pytest xulosasi, `m6-real-results.jsonl` qatorlari)_
-- **Topilmalar:** _(to'ldiriladi)_
+- **Holat:** PASSED — 2026-11-18, PTV Vissim Academic 2026 (SP 10)
+- **Test:** `tests/real/test_real_smoke.py::test_smoke_connect_load_simulate_close`
+- **Natija:** connect 12,3 s (`job_object: true`); yuklash 5,95 s, `Links=34`, layout yuklandi; 60 s simulyatsiya
+  `finished` (0,47 s devor vaqti); `vissim_close` → `method: exit`; Vissim jarayoni qolmadi.
+- **Topilmalar:** test `connected["warnings"]` kalitini kutgan (9-topilma) — tuzatildi.
 
 ## 2. Nomlarni tasdiqlash (PLAN 10.3, 2-band)
 
-- **Holat:** BLOCKED: COM litsenziyasi yo'q (Demo) — 2026-10-27
-- **Dalil:** M0 bloklanish dalili. docs/com-names.md dagi barcha nomlar `documented` (type library, attribute.xlsx va
-  rasmiy misol bo'yicha oflayn tekshirilgan), hech biri `verified` emas.
-- **Vosita:** `scripts/probe_com_names.py --i-have-a-com-license [--update]` — docs/com-names.md ning har bir qatori
-  uchun bitta tekshiruv (`PROBES` ro'yxati; jadval bilan mosligini `tests/unit/test_probe_com_names.py` tekshiradi)
-  va semantik tajribalar (`SimBreakAt`, `IsSimBreakAtActive`, eski break, `SimSec` run'dan keyin, `SigState`/
-  `ContrByCOM`, `ItemByKey` satr kalit, Job Object va bola jarayonlar, `Exit()`).
-- **Test:** `tests/real/test_real_com_names.py::test_probe_com_names`.
-- **Kutilgan natija:** server tayanadigan nomlar `ok`; qolgan nomlar `verified`/`rejected` bo'lib, docs/com-names.md
-  da yakunlanadi.
-- **Natija:** _(to'ldiriladi; `--update` xom natijalarni shu hujjat oxiriga qo'shadi)_
-- **Topilmalar:** _(to'ldiriladi)_
+- **Holat:** PASSED — 2026-11-18. 32 ta nom `verified`, 0 `rejected`, 0 tekshirilmagan (docs/com-names.md).
+- **Vosita:** `scripts/probe_com_names.py --i-have-a-com-license --update`; `tests/real/test_real_com_names.py`.
+- **Natija:** xom jadval va JSON — shu hujjat oxirida ("Xom natijalar"). Semantik tajribalar xulosasi —
+  docs/com-names.md, "M6 da aniqlangan xatti-harakatlar".
+- **Topilmalar:** 3- va 10-topilmalar (`IAttribute.ID`; `SetAttValue` type library'da yo'q).
 
 ## 3. Break semantikasi (PLAN 10.3, 3-band)
 
-- **Holat:** BLOCKED: COM litsenziyasi yo'q (Demo) — 2026-10-27
-- **Dalil:** M0 bloklanish dalili. Hozirgi bilim faqat hujjatlardan: rasmiy misolda "`SimBreakAt` = 0 means no
-  break", attribute.xlsx da `SimBreakAt` min 0, standart 0; `IsSimBreakAtActive` Vissim 2026 da yangi, ma'nosi
-  noma'lum.
-- **Testlar:** `tests/real/test_real_break_semantics.py` — `test_raw_break_at_and_break_disable_value` (xom COM:
-  120 s da pauza, `SimBreakAt=0` bilan run oxirigacha, run'dan keyingi `SimSec`), `test_stale_break_does_not_break_a_job`
-  (model run o'rtasida `SimSec`=120 da pauzada, `SimBreakAt=60` (o'tib ketgan) qolgan holat: xom `RunContinuous()` natijasi yoziladi, shu holatdan boshlangan job tugaydi), `test_pause_at_signal_state_and_resume` (`pause_at` → signal
-  holati → resume).
-- **Kutilgan natija:** 3 ta `PASSED`. Aks holda — `VISSIM_BREAK_DISABLE_VALUE` yoki `jobs.py` ga tuzatish (runbook 5-bo'lim).
-- **Natija:** _(to'ldiriladi)_
-- **Topilmalar:** _(to'ldiriladi)_
+- **Holat:** PASSED (3 ta test) — 2026-11-18
+- **Natija:** `SimBreakAt=120` → `RunContinuous()` aynan 120,0 s da to'xtadi (`IsRunning=1`; `IsSimBreakAtActive`
+  o'zi 0 → 1 bo'ldi). `SimBreakAt=0` bilan run oxirigacha bordi; run'dan keyin `SimSec=0`, `IsRunning=0`.
+  O'tib ketgan break (`SimSec=120` da `SimBreakAt=60`) qolgan holatdan boshlangan job'lar (bitta bo'lak va bo'laklab)
+  `finished` — ogohlantirish: "a simulation run may have been in progress (SimSec 120 s); it was stopped first".
+  `pause_at=[200]` → 200 s da `paused` → `SigState="GREEN"` va `SigState=1` (→ `RED`) yozildi, `ContrByCOM=true` →
+  `release_to_controller` → `ContrByCOM=false` → resume → `finished`.
+- **Topilmalar:** 1-topilma (`ContrByCOM` `1/0`) aynan shu testda chiqdi va tuzatildi. `VISSIM_BREAK_DISABLE_VALUE`
+  va `jobs.py` ga o'zgartirish kerak bo'lmadi.
 
 ## 4. Stress (PLAN 10.3, 4-band)
 
-- **Holat:** BLOCKED: COM litsenziyasi yo'q (Demo) — 2026-10-27
-- **Dalil:** M0 bloklanish dalili. Job holat mashinasi (bo'laklar, ko'p run, urug'lar, stop, `percent`) soxta Vissim
-  bilan `tests/unit/test_jobs.py` (67 test) va `tests/protocol/test_simulation_protocol.py` da tekshirilgan.
-- **Testlar:** `tests/real/test_real_stress.py` — `test_five_runs_of_an_hour` (5 × 3600 s, `percent` monoton,
-  `vissim_health` < 1 s, `SimulationRuns` da 5 ta urug'), `test_stop_takes_effect_within_one_chunk`.
-- **Kutilgan natija:** 2 ta `PASSED`; devor vaqti va har run vaqti (`run_wall_s`) yozib olinadi.
-- **Natija:** _(to'ldiriladi)_
-- **Topilmalar:** _(to'ldiriladi)_
+- **Holat:** PASSED (2 ta test) — 2026-11-18
+- **Natija:** 5 run × 3600 s — `finished`, jami 35,1 s devor vaqti, har run 6,9–7,1 s; `percent` monoton;
+  `vissim_health` eng ko'pi 0,001 s; `SimulationRuns`: urug'lar 42, 43, 44, 45, 46, har birida `SimEnd=3600`.
+  `vissim_stop_simulation` 1,0 s da ta'sir qildi (`stopped`, bo'lak chegarasida).
+- **Topilmalar:** 6-topilma (ortiqcha `KeepPrevResults` ogohlantirishi). Model kichik bo'lgani uchun simulyatsiya juda
+  tez — soatlab davom etadigan haqiqiy yuklama bilan sinalmagan.
 
 ## 5. Nosozlik (PLAN 10.3, 5-band)
 
-- **Holat:** BLOCKED: COM litsenziyasi yo'q (Demo) — 2026-10-27
-- **Dalil:** M0 bloklanish dalili. M0 da kuzatilgan litsenziya dialogi (`Управление лицензиями – PTV Vissim`) COM
-  chaqiruvini 75–120 s bloklashi server dizayniga kiritilgan: `vissim_connect` dialogni aniqlaydi va faqat o'zi
-  ochgan jarayonni yopadi (soxta qatlam bilan tekshirilgan).
-- **Testlar:** `tests/real/test_real_failures.py` — Vissim'ni o'ldirish → aniq xato → `vissim_restart` (avtomatik yoki
-  `--vissim-manual` bilan Task Manager orqali); "Save changes?" dialogi → `TIMEOUT_HUNG` (faqat `--vissim-manual -s`);
-  server o'ldirilsa Vissim yopiladi (Job Object); stdin yopilsa ≤ 300 ms. Claude Code'ni yopish — runbook C3.
-- **Kutilgan natija:** 4 ta `PASSED`; C3 da Vissim jarayoni 10 s ichida yo'qoladi.
-- **Natija:** _(to'ldiriladi)_
-- **Topilmalar:** _(to'ldiriladi)_
+- **Holat:** avtomatik qismi PASSED (3 ta test) — 2026-11-18; **qo'lda C1, C2, C3 o'tkazilmagan**
+- **Natija:** o'z Vissim'i o'ldirilgandan keyin `vissim_info` → `COM_ERROR` (HRESULT `0x800706BA`, "Сервер RPC
+  недоступен", `disconnected: true`), maslahat: "Call vissim_restart"; `vissim_health`: `connected=false`,
+  `vissim_alive=false`; `vissim_restart` yangi Vissim ochdi va tarmoq qayta yuklandi. Server jarayoni o'ldirilganda
+  Vissim 0,62 s da yo'qoldi (Job Object). Stdin yopilganda server 0,119 s da chiqdi (chegarasi 0,300 s), Vissim yopildi.
+- **O'tkazilmagan:** `test_modal_dialog_gives_timeout_hung_and_restart_recovers` (C2) — SKIPPED; C1 (Task Manager) va
+  C3 (haqiqiy Claude Code'ni yopish) ham qo'lda bajarilmagan.
+- **Topilmalar:** 4-topilma (litsenziya dialogi) va 9-topilma.
 
 ## 6. Kodirovka (PLAN 10.3, 6-band)
 
-- **Holat:** BLOCKED: COM litsenziyasi yo'q (Demo) — 2026-10-27
-- **Dalil:** M0 bloklanish dalili. Server tomoni (UTF-8, `non-ASCII path` ogohlantirishi, `Samarqand_ko'cha` yo'li)
-  soxta qatlam bilan `tests/protocol/test_files_objects_protocol.py` da tekshirilgan; Vissim'ning o'zi bunday yo'lni
-  o'qiy olishi tekshirilmagan.
-- **Test:** `tests/real/test_real_encoding.py::test_non_ascii_path_round_trip` — `Samarqand_ko'cha_Самарқанд` papkasida
-  yuklash, saqlash va CSV eksport.
-- **Kutilgan natija:** `PASSED`. Vissim o'qiy olmasa — README'da "loyihani ASCII yo'lga ko'chiring" tavsiyasi tasdiqlanadi.
-- **Natija:** _(to'ldiriladi)_
-- **Topilmalar:** _(to'ldiriladi)_
+- **Holat:** PASSED — 2026-11-18
+- **Natija:** `Samarqand_ko'cha_Самарқанд\tarmoq_ўзбек.inpx` yuklandi (ogohlantirish: "non-ASCII path; ..."),
+  saqlandi va CSV eksport qilindi (34 qator). Vissim 2026 bunday yo'lni muammosiz o'qidi. Qo'shimcha: havola nomiga
+  `Ko'cha Ўзбек 1` yozildi va qayta o'qildi; ruscha COM xato matnlari javobda to'g'ri (UTF-8) keladi.
+- **Topilmalar:** yo'q.
 
 ---
 
@@ -138,12 +140,12 @@ Buyruqlar (repozitoriya ildizida):
 ```powershell
 .\.venv\Scripts\python.exe -X utf8 -m pytest -p no:cacheprovider -q
 .\.venv\Scripts\python.exe -X utf8 -m ruff check src tests scripts
-.\.venv\Scripts\python.exe -X utf8 -m ruff format --check src tests scripts
 ```
 
-Natija (2026-10-27, `m6-real-prep` branch): **908 passed, 1 skipped, 12 deselected** (~70 s); ruff toza.
+Natija (2026-11-18, M6 tuzatishlaridan keyin): **981 passed, 1 skipped, 12 deselected** (~90 s); ruff toza.
 Skip: `tests/unit/test_policy.py::test_symlink_escape_is_denied` — bu kompyuterda symlink yaratish uchun huquq yo'q
 (`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 12 deselected — `tests/real`.
+2026-10-27 dagi (M6 tayyorgarlik) natija: 908 passed; M7 dan keyin 970.
 
 Bosqichlar tarixi (commit'lar bo'yicha):
 
@@ -181,3 +183,613 @@ Modullar bo'yicha (2026-10-27 dagi soni):
 ## Xom natijalar
 
 `scripts/probe_com_names.py --update` va `--vissim-results` bilan yig'ilgan natijalar shu bo'limdan keyin qo'shiladi.
+
+## probe_com_names.py xom natijalari — 2026-11-18T15:59:47+05:00
+
+Natija: 32 ok, 0 failed, 0 inconclusive, 0 skipped
+
+```text
+name                                                                    status        observed
+----------------------------------------------------------------------  ------------  ----------------------------------------
+`Vissim.LoadNet(path, additive)`                                        ok            loaded COM Basic Commands.inpx in 5.12 s; Links.Count=34
+`Vissim.LoadLayout(path)`                                               ok            loaded COM Basic Commands.layx
+`Vissim.SaveNetAs(path)`                                                ok            SaveNetAs -> file exists=True, size=227401
+`Vissim.Exit()`                                                         ok            closed=True, method=exit, 3.7 s
+`Vissim.SuspendUpdateGUI()` / `ResumeUpdateGUI(bool)`                   ok            SuspendUpdateGUI() and ResumeUpdateGUI(True) returned
+`Vissim.Net`, `.Simulation`, `.Evaluation`, `.Graphics`                 ok            Net=True, Simulation=True, Evaluation=True, Graphics=True
+`Graphics.CurrentNetworkWindow`                                         ok            CurrentNetworkWindow=object
+`Simulation.RunContinuous()` / `RunSingleStep()` / `Stop()`             ok            RunContinuous/RunSingleStep/Stop returned; after one step SimSec=0.2
+`<collection>.Count`, `.ItemByKey(key)`, `.ItemKeyExists(key)`          ok            Links.Count=34; ItemKeyExists(1)=True; ItemKeyExists(987654321)=False; ItemByKey(1).No=1
+`Net.Links`, `.Nodes`, `.SignalControllers`, `.SignalHeads`, `.Vehi...  ok            Links=34, Nodes=0, SignalControllers=1, SignalHeads=5, VehicleInputs=3, VehicleRoutingDecisionsStatic=3, DataCollectionMeasurements=2, VehicleTravelTimeMeasurements=6, QueueCounters=1
+`<collection>.GetMultipleAttributes(tuple)`                             ok            34 rows of (No, Name); first=(1, 'Old Link Name')
+`<obj>.AttValue(name)` / `.SetAttValue(name, value)`                    ok            Link 1 Name='Old Link Name'; write-back read 'Old Link Name'
+`<collection>.Attributes.GetAll()` → `IAttribute.Code/Name/ValueTyp...  ok            69 attributes; first: {'ID': 'NO', 'Code': '№', 'Name': 'Номер', 'ValueType': 1, 'Editable': True}
+`_oleobj_.GetTypeInfo()` → `GetTypeAttr().cFuncs` → `GetFuncDesc(i)...  ok            Simulation: 7 members; AttValue ['property_get', 'property_put'] and RunContinuous present
+`Net.SignalControllers[n].SGs[m]`                                       ok            Net.SignalControllers[1].SGs[1] -> No=1
+`Net.SimulationRuns` (`GetMultipleAttributes(('No','RandSeed','SimE...  ok            3 runs; last=(3, 3, 0.2)
+`SimPeriod`                                                             ok            SimPeriod=600 (write-back ok)
+`SimRes`                                                                ok            SimRes=5 (write-back ok)
+`SimSec`                                                                ok            SimSec=0.0
+`SimBreakAt`                                                            ok            SimBreakAt=0.0 (write-back ok)
+`RandSeed`                                                              ok            RandSeed=3 (write-back ok)
+`UseMaxSimSpeed`                                                        ok            UseMaxSimSpeed=1 (write-back ok)
+`NumCores`                                                              ok            NumCores=1; UseAllCores=1
+`IsRunning`                                                             ok            IsRunning=0
+`IsSimBreakAtActive`                                                    ok            IsSimBreakAtActive=0
+`NumRuns`, `RandSeedIncr`                                               ok            NumRuns=1 (write-back ok); RandSeedIncr=1 (write-back ok)
+`QuickMode`                                                             ok            QuickMode=0 (write-back ok)
+`KeepPrevResults`                                                       ok            KeepPrevResults='KEEPALL' (write-back ok)
+`SigState`                                                              ok            SigState=None
+`ContrByCOM`                                                            ok            ContrByCOM=None
+`VISSIM_SEED_ATTR`                                                      ok            RandSeed=3 (write-back read 3)
+`VISSIM_BREAK_DISABLE_VALUE`                                            ok            SimBreakAt=0 then RunContinuous: ran_to_end=True, SimSec after the run=0.0
+```
+
+<details><summary>JSON</summary>
+
+```json
+{
+ "started": "2026-11-18T15:59:47+05:00",
+ "model": "C:\\Users\\UltraPC\\AppData\\Local\\Temp\\vissim-probe-k4ie70iy\\model\\COM Basic Commands.inpx",
+ "layout": "C:\\Users\\UltraPC\\AppData\\Local\\Temp\\vissim-probe-k4ie70iy\\model\\COM Basic Commands.layx",
+ "workdir": "C:\\Users\\UltraPC\\AppData\\Local\\Temp\\vissim-probe-k4ie70iy",
+ "settings": {
+  "period": 600,
+  "break_at": 120,
+  "break_disable_value": 0,
+  "seed_attr": "RandSeed"
+ },
+ "connect": {
+  "pid": 27024,
+  "progid": "Vissim.Vissim",
+  "job_object": true,
+  "generation": 1,
+  "elapsed_s": 15.4,
+  "warnings": []
+ },
+ "process_after_connect": {
+  "pid": 27024,
+  "job_object": true,
+  "children": [
+   {
+    "pid": 12024,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   },
+   {
+    "pid": 3688,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   },
+   {
+    "pid": 31284,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   },
+   {
+    "pid": 12900,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   },
+   {
+    "pid": 32964,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   },
+   {
+    "pid": 6592,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   },
+   {
+    "pid": 31104,
+    "name": "msedgewebview2.exe",
+    "in_job": true
+   }
+  ],
+  "vissim_in_job": true
+ },
+ "keys": {
+  "first_link_key": 1,
+  "sc_key": 1,
+  "sg_key": 1
+ },
+ "process_after_runs": {
+  "pid": 27024,
+  "job_object": true,
+  "children": [],
+  "vissim_in_job": true
+ },
+ "probes": [
+  {
+   "name": "`Vissim.LoadNet(path, additive)`",
+   "status": "ok",
+   "observed": "loaded COM Basic Commands.inpx in 5.12 s; Links.Count=34",
+   "data": {}
+  },
+  {
+   "name": "`Vissim.LoadLayout(path)`",
+   "status": "ok",
+   "observed": "loaded COM Basic Commands.layx",
+   "data": {}
+  },
+  {
+   "name": "`Vissim.SaveNetAs(path)`",
+   "status": "ok",
+   "observed": "SaveNetAs -> file exists=True, size=227401",
+   "data": {
+    "path": "C:\\Users\\UltraPC\\AppData\\Local\\Temp\\vissim-probe-k4ie70iy\\probe_saved.inpx"
+   }
+  },
+  {
+   "name": "`Vissim.Exit()`",
+   "status": "ok",
+   "observed": "closed=True, method=exit, 3.7 s",
+   "data": {
+    "closed": true,
+    "method": "exit",
+    "pid": 27024,
+    "warnings": [],
+    "elapsed_s": 3.7
+   }
+  },
+  {
+   "name": "`Vissim.SuspendUpdateGUI()` / `ResumeUpdateGUI(bool)`",
+   "status": "ok",
+   "observed": "SuspendUpdateGUI() and ResumeUpdateGUI(True) returned",
+   "data": {}
+  },
+  {
+   "name": "`Vissim.Net`, `.Simulation`, `.Evaluation`, `.Graphics`",
+   "status": "ok",
+   "observed": "Net=True, Simulation=True, Evaluation=True, Graphics=True",
+   "data": {
+    "Net": true,
+    "Simulation": true,
+    "Evaluation": true,
+    "Graphics": true
+   }
+  },
+  {
+   "name": "`Graphics.CurrentNetworkWindow`",
+   "status": "ok",
+   "observed": "CurrentNetworkWindow=object",
+   "data": {}
+  },
+  {
+   "name": "`Simulation.RunContinuous()` / `RunSingleStep()` / `Stop()`",
+   "status": "ok",
+   "observed": "RunContinuous/RunSingleStep/Stop returned; after one step SimSec=0.2",
+   "data": {}
+  },
+  {
+   "name": "`<collection>.Count`, `.ItemByKey(key)`, `.ItemKeyExists(key)`",
+   "status": "ok",
+   "observed": "Links.Count=34; ItemKeyExists(1)=True; ItemKeyExists(987654321)=False; ItemByKey(1).No=1",
+   "data": {}
+  },
+  {
+   "name": "`Net.Links`, `.Nodes`, `.SignalControllers`, `.SignalHeads`, `.VehicleInputs`, `.VehicleRoutingDecisionsStatic`, `.DataCollectionMeasurements`, `.VehicleTravelTimeMeasurements`, `.QueueCounters`",
+   "status": "ok",
+   "observed": "Links=34, Nodes=0, SignalControllers=1, SignalHeads=5, VehicleInputs=3, VehicleRoutingDecisionsStatic=3, DataCollectionMeasurements=2, VehicleTravelTimeMeasurements=6, QueueCounters=1",
+   "data": {
+    "Links": 34,
+    "Nodes": 0,
+    "SignalControllers": 1,
+    "SignalHeads": 5,
+    "VehicleInputs": 3,
+    "VehicleRoutingDecisionsStatic": 3,
+    "DataCollectionMeasurements": 2,
+    "VehicleTravelTimeMeasurements": 6,
+    "QueueCounters": 1
+   }
+  },
+  {
+   "name": "`<collection>.GetMultipleAttributes(tuple)`",
+   "status": "ok",
+   "observed": "34 rows of (No, Name); first=(1, 'Old Link Name')",
+   "data": {}
+  },
+  {
+   "name": "`<obj>.AttValue(name)` / `.SetAttValue(name, value)`",
+   "status": "ok",
+   "observed": "Link 1 Name='Old Link Name'; write-back read 'Old Link Name'",
+   "data": {}
+  },
+  {
+   "name": "`<collection>.Attributes.GetAll()` → `IAttribute.Code/Name/ValueType/Editable`",
+   "status": "ok",
+   "observed": "69 attributes; first: {'ID': 'NO', 'Code': '№', 'Name': 'Номер', 'ValueType': 1, 'Editable': True}",
+   "data": {
+    "ID": "NO",
+    "Code": "№",
+    "Name": "Номер",
+    "ValueType": 1,
+    "Editable": true
+   }
+  },
+  {
+   "name": "`_oleobj_.GetTypeInfo()` → `GetTypeAttr().cFuncs` → `GetFuncDesc(i)` → `GetNames(memid)`",
+   "status": "ok",
+   "observed": "Simulation: 7 members; AttValue ['property_get', 'property_put'] and RunContinuous present",
+   "data": {}
+  },
+  {
+   "name": "`Net.SignalControllers[n].SGs[m]`",
+   "status": "ok",
+   "observed": "Net.SignalControllers[1].SGs[1] -> No=1",
+   "data": {}
+  },
+  {
+   "name": "`Net.SimulationRuns` (`GetMultipleAttributes(('No','RandSeed','SimEnd'))`)",
+   "status": "ok",
+   "observed": "3 runs; last=(3, 3, 0.2)",
+   "data": {
+    "rows": [
+     [
+      1,
+      3,
+      600.0
+     ],
+     [
+      2,
+      3,
+      600.0
+     ],
+     [
+      3,
+      3,
+      0.2
+     ]
+    ]
+   }
+  },
+  {
+   "name": "`SimPeriod`",
+   "status": "ok",
+   "observed": "SimPeriod=600 (write-back ok)",
+   "data": {
+    "path": "Simulation",
+    "SimPeriod": 600,
+    "SimPeriod.writeback": {
+     "write": null,
+     "read_again": 600
+    }
+   }
+  },
+  {
+   "name": "`SimRes`",
+   "status": "ok",
+   "observed": "SimRes=5 (write-back ok)",
+   "data": {
+    "path": "Simulation",
+    "SimRes": 5,
+    "SimRes.writeback": {
+     "write": null,
+     "read_again": 5
+    }
+   }
+  },
+  {
+   "name": "`SimSec`",
+   "status": "ok",
+   "observed": "SimSec=0.0",
+   "data": {
+    "path": "Simulation",
+    "SimSec": 0.0
+   }
+  },
+  {
+   "name": "`SimBreakAt`",
+   "status": "ok",
+   "observed": "SimBreakAt=0.0 (write-back ok)",
+   "data": {
+    "path": "Simulation",
+    "SimBreakAt": 0.0,
+    "SimBreakAt.writeback": {
+     "write": null,
+     "read_again": 0.0
+    }
+   }
+  },
+  {
+   "name": "`RandSeed`",
+   "status": "ok",
+   "observed": "RandSeed=3 (write-back ok)",
+   "data": {
+    "path": "Simulation",
+    "RandSeed": 3,
+    "RandSeed.writeback": {
+     "write": null,
+     "read_again": 3
+    }
+   }
+  },
+  {
+   "name": "`UseMaxSimSpeed`",
+   "status": "ok",
+   "observed": "UseMaxSimSpeed=1 (write-back ok)",
+   "data": {
+    "path": "Simulation",
+    "UseMaxSimSpeed": 1,
+    "UseMaxSimSpeed.writeback": {
+     "write": null,
+     "read_again": 1
+    }
+   }
+  },
+  {
+   "name": "`NumCores`",
+   "status": "ok",
+   "observed": "NumCores=1; UseAllCores=1",
+   "data": {
+    "path": "Simulation",
+    "NumCores": 1,
+    "UseAllCores": 1
+   }
+  },
+  {
+   "name": "`IsRunning`",
+   "status": "ok",
+   "observed": "IsRunning=0",
+   "data": {
+    "path": "Simulation",
+    "IsRunning": 0
+   }
+  },
+  {
+   "name": "`IsSimBreakAtActive`",
+   "status": "ok",
+   "observed": "IsSimBreakAtActive=0",
+   "data": {
+    "path": "Simulation",
+    "IsSimBreakAtActive": 0
+   }
+  },
+  {
+   "name": "`NumRuns`, `RandSeedIncr`",
+   "status": "ok",
+   "observed": "NumRuns=1 (write-back ok); RandSeedIncr=1 (write-back ok)",
+   "data": {
+    "path": "Simulation",
+    "NumRuns": 1,
+    "NumRuns.writeback": {
+     "write": null,
+     "read_again": 1
+    },
+    "RandSeedIncr": 1,
+    "RandSeedIncr.writeback": {
+     "write": null,
+     "read_again": 1
+    }
+   }
+  },
+  {
+   "name": "`QuickMode`",
+   "status": "ok",
+   "observed": "QuickMode=0 (write-back ok)",
+   "data": {
+    "path": "Graphics.CurrentNetworkWindow",
+    "QuickMode": 0,
+    "QuickMode.writeback": {
+     "write": null,
+     "read_again": 0
+    }
+   }
+  },
+  {
+   "name": "`KeepPrevResults`",
+   "status": "ok",
+   "observed": "KeepPrevResults='KEEPALL' (write-back ok)",
+   "data": {
+    "path": "Evaluation",
+    "KeepPrevResults": "KEEPALL",
+    "KeepPrevResults.writeback": {
+     "write": null,
+     "read_again": "KEEPALL"
+    }
+   }
+  },
+  {
+   "name": "`SigState`",
+   "status": "ok",
+   "observed": "SigState=None",
+   "data": {
+    "path": "Net.SignalControllers[1].SGs[1]",
+    "SigState": null
+   }
+  },
+  {
+   "name": "`ContrByCOM`",
+   "status": "ok",
+   "observed": "ContrByCOM=None",
+   "data": {
+    "path": "Net.SignalControllers[1].SGs[1]",
+    "ContrByCOM": null
+   }
+  },
+  {
+   "name": "`VISSIM_SEED_ATTR`",
+   "status": "ok",
+   "observed": "RandSeed=3 (write-back read 3)",
+   "data": {}
+  },
+  {
+   "name": "`VISSIM_BREAK_DISABLE_VALUE`",
+   "status": "ok",
+   "observed": "SimBreakAt=0 then RunContinuous: ran_to_end=True, SimSec after the run=0.0",
+   "data": {}
+  }
+ ],
+ "semantics": {
+  "prepare": {
+   "saved": {
+    "SimPeriod": 600,
+    "SimBreakAt": 0.0,
+    "UseMaxSimSpeed": 1,
+    "IsSimBreakAtActive": 0,
+    "QuickMode": 0,
+    "KeepPrevResults": "KEEPALL"
+   },
+   "set_KeepPrevResults_KeepAll": null,
+   "KeepPrevResults": "KEEPALL",
+   "idle": {
+    "SimSec": 0.0,
+    "IsRunning": 0,
+    "SimulationRuns.Count": 0
+   }
+  },
+  "signal_outside_run": {
+   "path": "Net.SignalControllers[1].SGs[1]",
+   "before": {
+    "SigState": null,
+    "ContrByCOM": null
+   },
+   "write_RED": {
+    "error": "AttValue failed: Объект 1 - 1: West => East: Атрибут Вид сигнала не может быть изменен."
+   },
+   "after": {
+    "SigState": null,
+    "ContrByCOM": null
+   },
+   "release": {
+    "error": "AttValue failed: Объект 1 - 1: West => East: Атрибут Управляемый COM не может быть изменен."
+   },
+   "after_release": {
+    "ContrByCOM": null
+   }
+  },
+  "break_at_n": {
+   "N": 120,
+   "time_step": 0.2,
+   "IsSimBreakAtActive_before": 0,
+   "IsSimBreakAtActive_after_set": 1,
+   "run": {
+    "wall_s": 0.34,
+    "SimSec": 120.0,
+    "IsRunning": 1,
+    "SimulationRuns.Count": 1
+   },
+   "paused_at_N": true,
+   "runs_before": 0
+  },
+  "signal_while_paused": {
+   "path": "Net.SignalControllers[1].SGs[1]",
+   "before": {
+    "SigState": "REDAMBER",
+    "ContrByCOM": 0
+   },
+   "write_GREEN": null,
+   "after_GREEN": {
+    "SigState": "GREEN",
+    "ContrByCOM": 1
+   },
+   "write_int_1": null,
+   "after_int_1": {
+    "SigState": "RED",
+    "ContrByCOM": 1
+   },
+   "release": null,
+   "after_release": {
+    "SigState": "RED",
+    "ContrByCOM": 0
+   }
+  },
+  "stale_break": {
+   "stale_break": 60,
+   "simsec_before": 120,
+   "runs_before": 1,
+   "IsSimBreakAtActive": 1,
+   "IsSimBreakAtActive_forced_by_probe": false,
+   "run": {
+    "wall_s": 0.39,
+    "SimSec": 0.0,
+    "IsRunning": 0,
+    "SimulationRuns.Count": 1
+   },
+   "outcome": "paused_at_0.0",
+   "stop": {
+    "SimSec": 0.0,
+    "IsRunning": 0,
+    "SimulationRuns.Count": 1
+   }
+  },
+  "break_disable_runs_to_end": {
+   "value": 0,
+   "IsSimBreakAtActive": 1,
+   "IsSimBreakAtActive_forced_by_probe": false,
+   "runs_before": 1,
+   "SimBreakAt_read_back": 0.0,
+   "after": {
+    "wall_s": 0.67,
+    "SimSec": 0.0,
+    "IsRunning": 0,
+    "SimulationRuns.Count": 2
+   },
+   "last_run": {
+    "No": 2,
+    "RandSeed": 3,
+    "SimEnd": 600.0
+   },
+   "ran_to_end": true
+  },
+  "single_step_and_stop": {
+   "time_step": 0.2,
+   "after_step": {
+    "SimSec": 0.2,
+    "IsRunning": 1,
+    "SimulationRuns.Count": 3
+   },
+   "after_stop": {
+    "SimSec": 0.0,
+    "IsRunning": 0,
+    "SimulationRuns.Count": 3
+   },
+   "runs_before": 2
+  },
+  "item_by_key_string": {
+   "key": 1,
+   "ItemKeyExists(str)": true,
+   "ItemByKey(str).No": 1
+  },
+  "restore": {
+   "SimPeriod": null,
+   "SimBreakAt": null,
+   "UseMaxSimSpeed": null,
+   "IsSimBreakAtActive": null,
+   "QuickMode": null,
+   "KeepPrevResults": null,
+   "ResumeUpdateGUI": null
+  }
+ },
+ "info": {
+  "load": {
+   "LoadNet": "ok",
+   "load_s": 5.12,
+   "LoadLayout": "ok",
+   "links": 34
+  },
+  "version": "PTV Vissim Academic 2026 (SP 10)",
+  "final_save": {
+   "path": "C:\\Users\\UltraPC\\AppData\\Local\\Temp\\vissim-probe-k4ie70iy\\probe_final.inpx",
+   "saved": true,
+   "result": null
+  }
+ },
+ "close": {
+  "closed": true,
+  "method": "exit",
+  "pid": 27024,
+  "warnings": [],
+  "elapsed_s": 3.7
+ },
+ "finished": "2026-11-18T16:00:15+05:00",
+ "interactive_vissim_pids": [
+  8,
+  5088,
+  10468
+ ]
+}
+```
+
+</details>

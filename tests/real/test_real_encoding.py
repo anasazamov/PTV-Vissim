@@ -35,7 +35,7 @@ def test_non_ascii_path_round_trip(
         non_ascii_load={"ok": loaded["ok"], "warnings": loaded.get("warnings"), "error": loaded.get("error")}
     )
     assert loaded["ok"] is True, f"Vissim could not load the non-ASCII path: {loaded}"
-    assert any("non-ASCII" in w for w in loaded["warnings"]), loaded["warnings"]
+    assert any("non-ASCII" in w for w in loaded.get("warnings", [])), loaded.get("warnings", [])
     assert loaded["counts"]["Links"] == ascii_counts["Links"]
 
     saved_path = target / "saqlangan_ўзбек.inpx"

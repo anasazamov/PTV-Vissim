@@ -167,15 +167,18 @@ def test_multi_att_values_and_set_all(fake_vissim: FakeVissim) -> None:
 
 def test_attribute_container(fake_vissim: FakeVissim) -> None:
     attributes = fake_vissim.Net.Links.Attributes
-    infos = {info.Code: info for info in attributes.GetAll()}
+    infos = {info.ID: info for info in attributes.GetAll()}
     assert attributes.Count == len(infos)
-    assert infos["No"].Editable is False
-    assert infos["Name"].Editable is True
-    assert infos["NumLanes"].ValueType == "Integer"
-    assert infos["NumLanes"].Name == "Num Lanes"
-    assert attributes.ItemByKey("name").Code == "Name"
-    measurement_codes = {info.Code for info in fake_vissim.Net.DataCollectionMeasurements.Attributes.GetAll()}
-    assert {"Vehs", "Speed"} <= measurement_codes
+    assert infos["NO"].Editable is False
+    assert infos["NAME"].Editable is True
+    assert infos["NUMLANES"].ValueType == "Integer"
+    # like real Vissim, Code and Name are "translated" (not identifiers); ID is what AttValue understands
+    assert infos["NUMLANES"].Code == "~NumLanes" and infos["NUMLANES"].Name == "~Num Lanes"
+    assert attributes.ItemByKey("name").ID == "NAME"
+    link = fake_vissim.Net.Links.ItemByKey(1)
+    assert link.AttValue(infos["NUMLANES"].ID) == link.AttValue("NumLanes")
+    measurement_codes = {info.ID for info in fake_vissim.Net.DataCollectionMeasurements.Attributes.GetAll()}
+    assert {"VEHS", "SPEED"} <= measurement_codes
 
 
 def test_nested_collections(fake_vissim: FakeVissim) -> None:

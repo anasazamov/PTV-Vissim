@@ -415,21 +415,30 @@ def probe_attributes_getall(ctx: Any, st: ProbeState) -> Outcome:
     first = infos[0]
     sample = {
         name: _try(lambda name=name: getattr(first, name))
-        for name in ("Code", "Name", "ValueType", "Editable")
+        for name in ("ID", "Code", "Name", "ValueType", "Editable")
     }
     bad = [k for k, v in sample.items() if _failed(v)]
+    if not bad:
+        # ID (not the translated Code) must be what AttValue understands.
+        by_id = _try(lambda: ctx.vissim.Net.Links.ItemByKey(st.first_link_key).AttValue(sample["ID"]))
+        if _failed(by_id):
+            bad.append(f"AttValue({sample['ID']!r})")
     return Outcome(FAILED if bad else OK, f"{len(infos)} attributes; first: {_short(sample)}", sample)
 
 
 def probe_type_info(ctx: Any, st: ProbeState) -> Outcome:
     members = ctx.backend.type_info_members(ctx.vissim.Simulation)
     names = {m["name"] for m in members}
-    expected = {"AttValue", "SetAttValue", "RunContinuous"}
+    # SetAttValue is not a type-library member: it is pywin32's spelling of the AttValue property put.
+    expected = {"AttValue", "RunContinuous"}
     missing = sorted(expected - names)
+    kinds = sorted(m["kind"] for m in members if m["name"] == "AttValue")
+    if "property_put" not in kinds:
+        missing.append("AttValue (property_put)")
     return Outcome(
         FAILED if missing else OK,
         f"Simulation: {len(members)} members"
-        + (f"; missing {missing}" if missing else "; AttValue, SetAttValue, RunContinuous present"),
+        + (f"; missing {missing}" if missing else f"; AttValue {kinds} and RunContinuous present"),
     )
 
 

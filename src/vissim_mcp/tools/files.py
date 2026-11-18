@@ -114,14 +114,26 @@ def check_layout_companion(policy: PathPolicy, target: Path) -> list[str]:
         raise
 
 
-def require_folder(target: Path) -> None:
-    if not target.parent.is_dir():
+def ensure_folder(target: Path) -> str | None:
+    """Create the folder of ``target`` when it does not exist yet; returns the created folder (else None).
+
+    Called only after ``PathPolicy.check_write`` accepted ``target`` (resolved, inside an allowed directory,
+    outside the read-only ones), so the new folders are inside an allowed directory too. The client has no
+    other tool to create a folder, and "work/variant1.inpx" in an empty project is the normal first save.
+    """
+    folder = target.parent
+    if folder.is_dir():
+        return None
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
         raise VissimMcpError(
             ErrorCode.FILE_NOT_FOUND,
-            f"the folder '{target.parent}' does not exist",
-            hint="Save into an existing folder (folders are not created automatically).",
+            f"the folder '{folder}' does not exist and could not be created: {describe_exception(exc)}",
+            hint="Save into an existing, writable folder inside the allowed directories.",
             details={"path": str(target)},
-        )
+        ) from None
+    return str(folder)
 
 
 def _merge(warnings: list[str], more: list[str]) -> None:
@@ -214,18 +226,20 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         """Save the network in Vissim to a .inpx file (SaveNetAs); a file it replaces is backed up first.
 
         save_as must be inside the allowed directories and outside the read-only ones (default
-        <root>\\models\\original); a relative path is relative to the first allowed directory and the folder
-        must exist. An existing file is first copied to <folder>\\backups\\<name>_YYYYMMDD_HHMMSS.inpx (its
-        .layx layout too). Overwriting a file loaded in this session - normally the original network - also
-        needs overwrite_loaded=true. Nothing is saved automatically: call this after every change to keep.
-        Every call is written to the audit log (path, backups, SHA-256).
+        <root>\\models\\original); a relative path is relative to the first allowed directory; a folder
+        that does not exist yet is created. An existing file is first copied to
+        <folder>\\backups\\<name>_YYYYMMDD_HHMMSS.inpx (its .layx layout too). Overwriting a file loaded in
+        this session - normally the original network - also needs overwrite_loaded=true. Nothing is saved
+        automatically: call this after every change to keep. Every call is written to the audit log (path,
+        backups, SHA-256).
 
         Parameters: save_as - the target .inpx path; overwrite_loaded - allow overwriting a file that was
         loaded in this session.
         Returns: saved_path, backup_path (null when no file was replaced), layout_backup_path (only when a
-        layout was backed up), sha256 and size_bytes of the saved file, overwritten, warnings.
+        layout was backed up), created_folder (only when a folder was created), sha256 and size_bytes of the
+        saved file, overwritten, warnings.
         Errors: NOT_CONNECTED, PATH_DENIED, READ_ONLY_PATH, INVALID_ARGUMENT (file type, the loaded file
-        without overwrite_loaded), FILE_NOT_FOUND (the folder does not exist), COM_ERROR, TIMEOUT_HUNG.
+        without overwrite_loaded), FILE_NOT_FOUND (the folder could not be created), COM_ERROR, TIMEOUT_HUNG.
 
         Example: vissim_save_network(save_as="scenarios\\base_v2.inpx")
         """
@@ -235,7 +249,6 @@ def register(mcp: FastMCP, service: VissimService) -> None:
             service.ensure_connected()
             target, warnings = await asyncio.to_thread(policy.check_write, save_as, SAVE_EXT)
             audit.update(path=str(target))
-            await asyncio.to_thread(require_folder, target)
             _merge(warnings, await asyncio.to_thread(check_layout_companion, policy, target))
             if await asyncio.to_thread(service.is_loaded_file, target) and not overwrite_loaded:
                 raise VissimMcpError(
@@ -244,6 +257,9 @@ def register(mcp: FastMCP, service: VissimService) -> None:
                     hint="Save under a new name, or pass overwrite_loaded=true (a backup is made first).",
                     details={"path": str(target)},
                 )
+            created_folder = await asyncio.to_thread(ensure_folder, target)
+            if created_folder:
+                audit.update(created_folder=created_folder)
             existed = target.exists()
             backups = await asyncio.to_thread(backup_before_save, policy, target)
             audit.update(overwritten=existed, **backups)
@@ -272,6 +288,8 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         result: dict[str, Any] = {"saved_path": str(target), "backup_path": backups.get("backup_path")}
         if "layout_backup_path" in backups:
             result["layout_backup_path"] = backups["layout_backup_path"]
+        if created_folder:
+            result["created_folder"] = created_folder
         result.update(
             sha256=digest, size_bytes=size, overwritten=existed, warnings=[*warnings, *audit.warnings]
         )

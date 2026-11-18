@@ -4,8 +4,9 @@ Sets the state of one signal group (``Net.SignalControllers[sc_no].SGs[sg_no]``)
 to its signal controller. Writing ``SigState`` makes Vissim switch the group to COM control (``ContrByCOM``)
 by itself; ``release_to_controller`` writes ``ContrByCOM = False``. Refused with ``JOB_RUNNING`` while a
 simulation job is ``running`` - allowed when it is ``paused`` (at a ``pause_at`` point) or when there is no
-active job. The check is repeated on the COM worker, right before the write. Every call writes one audit
-record with the old and the new values (PLAN 6.8).
+active job (real Vissim then refuses the write itself unless a run is in progress: outside a run ``SigState``
+reads as empty and cannot be changed). The check is repeated on the COM worker, right before the write.
+Every call writes one audit record with the old and the new values (PLAN 6.8).
 """
 
 from __future__ import annotations
@@ -40,6 +41,13 @@ MAX_STATE_CHARS = 32
 STATE_HINT = (
     'Use a Vissim signal state name such as "RED", "GREEN", "AMBER", "REDAMBER" (or its number 1..11); '
     "check the current value with vissim_get_attributes."
+)
+#: Real Vissim (2026): outside a simulation run SigState reads as empty and neither SigState nor ContrByCOM
+#: can be written ("the attribute cannot be changed").
+NO_SIMULATION_HINT = (
+    "Vissim accepts signal states only while a simulation run is in progress: start the simulation with "
+    "vissim_start_simulation(pause_at=[...]), wait until the job is paused, set the state, then "
+    "vissim_resume_simulation."
 )
 
 IntArg = Annotated[Any, WithJsonSchema({"type": "integer"})]
@@ -112,6 +120,14 @@ def _read(obj: Any, name: str, errors: dict[str, str]) -> Any:
         return None
 
 
+def _read_flag(obj: Any, name: str, errors: dict[str, str]) -> Any:
+    """A boolean attribute as ``bool``: Vissim returns booleans through COM as the integers 1 and 0."""
+    value = _read(obj, name, errors)
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    return value
+
+
 def _write(obj: Any, name: str, value: Any, label: str, hint: str | None) -> None:
     try:
         obj.SetAttValue(name, value)
@@ -147,20 +163,22 @@ def set_signal_task(
     errors: dict[str, str] = {}
     progress["old"] = {
         SIG_STATE: _read(group, SIG_STATE, errors),
-        CONTR_BY_COM: _read(group, CONTR_BY_COM, errors),
+        CONTR_BY_COM: _read_flag(group, CONTR_BY_COM, errors),
     }
+    # No simulation run in progress: SigState reads as empty and Vissim refuses both writes.
+    idle = progress["old"][SIG_STATE] is None and SIG_STATE not in errors
     written: list[str] = []
     progress["written"] = written
     if state is not None:
-        _write(group, SIG_STATE, state, label, STATE_HINT)
+        _write(group, SIG_STATE, state, label, NO_SIMULATION_HINT if idle else STATE_HINT)
         written.append(SIG_STATE)
     if release:
-        _write(group, CONTR_BY_COM, False, label, None)
+        _write(group, CONTR_BY_COM, False, label, NO_SIMULATION_HINT if idle else None)
         written.append(CONTR_BY_COM)
     after: dict[str, str] = {}
     progress["new"] = {
         SIG_STATE: _read(group, SIG_STATE, after),
-        CONTR_BY_COM: _read(group, CONTR_BY_COM, after),
+        CONTR_BY_COM: _read_flag(group, CONTR_BY_COM, after),
     }
     return {"path": label, "old": progress["old"], "new": progress["new"], "errors": {**errors, **after}}
 
@@ -176,8 +194,9 @@ def register(mcp: FastMCP, service: VissimService) -> None:
     ) -> dict[str, Any]:
         """Set the state of one signal group through COM, or hand the group back to its signal controller.
 
-        Allowed only when no simulation job is running: with no job, or while a job is paused (start the
-        simulation with pause_at, wait until state is paused, set the signals, then vissim_resume_simulation).
+        Use it while a simulation job is paused: start the simulation with pause_at, wait until state is
+        paused, set the signals, then vissim_resume_simulation. Refused with JOB_RUNNING while a job is
+        running; without a simulation run in progress Vissim itself refuses the change (COM_ERROR).
         Writing a state switches the group to COM control - Vissim sets ContrByCOM=true itself and the group
         keeps this state until it is released. release_to_controller=true writes ContrByCOM=false so the
         signal controller drives the group again. Give either state or release_to_controller=true. Written to
@@ -190,7 +209,8 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         ContrByCOM} before), errors (values that could not be read), warnings.
         Errors: JOB_RUNNING (a job is running - wait for a pause or stop it), INVALID_ARGUMENT (bad numbers,
         neither or both of state and release_to_controller), RESOLVE_FAILED (no such signal controller or
-        group), NOT_CONNECTED, COM_ERROR (e.g. Vissim refused the state), TIMEOUT_HUNG.
+        group), NOT_CONNECTED, COM_ERROR (Vissim refused the state, or no simulation run is in progress),
+        TIMEOUT_HUNG.
 
         Example: vissim_set_signal_state(sc_no=1, sg_no=2, state="GREEN")
         """
