@@ -67,14 +67,15 @@ class ComBackend(Protocol):
     def is_com_error(self, exc: BaseException) -> bool:
         """True when ``exc`` is a COM error (``pywintypes.com_error`` or a compatible fake)."""
 
-    def type_info_members(self, obj: Any) -> list[dict[str, str]]:
+    def type_info_members(self, obj: Any) -> list[dict[str, Any]]:
         """``[{name, kind}]`` from the COM type info of ``obj`` (see :func:`type_info_members`)."""
 
 
-def type_info_members(obj: Any) -> list[dict[str, str]]:
+def type_info_members(obj: Any) -> list[dict[str, Any]]:
     """Members of ``obj`` from its COM type information: ``[{"name", "kind"}]``, sorted and de-duplicated.
 
-    ``kind`` is ``method``, ``property_get`` or ``property_put``. IUnknown/IDispatch plumbing and restricted
+    ``kind`` is ``method``, ``property_get`` or ``property_put``; a method also has ``params`` (its
+    parameter names). IUnknown/IDispatch plumbing and restricted
     members are left out. Raises ``VissimMcpError(INFO_UNAVAILABLE)`` when the object has no type information;
     other COM errors (e.g. a disconnected Vissim) propagate unchanged.
     """
@@ -94,7 +95,7 @@ def type_info_members(obj: Any) -> list[dict[str, str]]:
         details = {"hresult": hresult, "hresult_hex": hresult_hex(hresult)} if hresult is not None else None
         raise VissimMcpError(ErrorCode.INFO_UNAVAILABLE, _NO_TYPE_INFO, details=details) from None
 
-    members: set[tuple[str, str]] = set()
+    members: dict[tuple[str, str], tuple[str, ...]] = {}
     for index in range(max(0, min(count, MAX_TYPE_INFO_FUNCS))):
         desc = type_info.GetFuncDesc(index)
         kind = _INVKIND_TO_KIND.get(int(desc.invkind))
@@ -105,5 +106,11 @@ def type_info_members(obj: Any) -> list[dict[str, str]]:
             continue
         name = str(names[0])
         if name and name not in PLUMBING_MEMBERS:
-            members.add((name, kind))
-    return [{"name": name, "kind": kind} for name, kind in sorted(members)]
+            members.setdefault((name, kind), tuple(str(param) for param in names[1:]))
+    result: list[dict[str, Any]] = []
+    for (name, kind), params in sorted(members.items()):
+        member: dict[str, Any] = {"name": name, "kind": kind}
+        if kind == "method":
+            member["params"] = list(params)  # e.g. AddLink -> ["Key", "WktLinestring", "LaneWidths"]
+        result.append(member)
+    return result

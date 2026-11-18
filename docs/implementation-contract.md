@@ -52,7 +52,7 @@ PLAN.md and report the conflict. Items marked EXTENSION are additive features in
 - mcp 1.30.0: `stdio_server(stdin=, stdout=)` accepts custom streams; a tool returning `CallToolResult` with
   `structured_output=False` is passed through unchanged.
 
-## 2. Response format (all 22 tools)
+## 2. Response format (all tools: the 22 of PLAN 7 + 2 extensions)
 
 Every tool is registered through `tools/_common.register_tool` and returns `CallToolResult` with one text block of compact
 JSON: `{"ok": true, ...}` or `{"ok": false, "error": {"code", "message", "hint"?, "details"?}}`, `isError = not ok`,

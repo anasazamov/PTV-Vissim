@@ -604,3 +604,37 @@ async def test_audit_is_written_off_the_event_loop_thread(
     arguments = {"path": "Net.Links[1]", "values": {"Name": "a"}, "dry_run": True}
     await call(mcp, "vissim_set_attributes", arguments)
     assert threads and threading.main_thread() not in threads
+
+
+async def test_path_attributes_may_point_into_the_allowed_directories(
+    setup: tuple[Harness, FastMCP], isolated_env: dict[str, Path], tmp_path: Path
+) -> None:
+    """A network built through the server needs e.g. the .sig file of a signal controller (SupplyFile2);
+    the attribute policy lets a path attribute point into the allowed directories and nowhere else."""
+    h, mcp = setup
+    h.vissim.add_object("Links", 500, SupplyFile2="", ShowDir=False)
+    inside = isolated_env["projects"] / "signals" / "sc1.sig"
+    for value in (str(inside), "signals/sc1.sig", "", 0, True):
+        written = await call(
+            mcp, "vissim_set_attributes", {"path": "Net.Links[500]", "values": {"SupplyFile2": value}}
+        )
+        assert written["ok"] is True and written["failed"] == [], (value, written)
+    assert h.vissim.attribute("Links", 500, "SupplyFile2") == "True"
+    for value in (str(tmp_path / "outside.sig"), "../outside.sig", "C:/Windows/system.ini"):
+        denied = await call(
+            mcp, "vissim_set_attributes", {"path": "Net.Links[500]", "values": {"SupplyFile2": value}}
+        )
+        assert denied["error"]["code"] == "ATTRIBUTE_DENIED", (value, denied)
+        assert "allowed directories" in denied["error"]["message"]
+        assert "VISSIM_ALLOWED_DIRS" in denied["error"]["hint"]
+    # bulk writes and simulation extras keep the strict rule
+    bulk = await call(
+        mcp,
+        "vissim_set_attribute_bulk",
+        {
+            "collection": "Net.Links",
+            "attribute": "SupplyFile2",
+            "items": [{"key": 500, "value": str(inside)}],
+        },
+    )
+    assert bulk["error"]["code"] == "ATTRIBUTE_DENIED"

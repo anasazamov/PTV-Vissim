@@ -34,7 +34,7 @@ from ..errors import (
     is_connection_error,
 )
 from ..output import dumps, paginate, to_jsonable
-from ..policy import check_attribute_writable
+from ..policy import PathPolicy, check_attribute_value, check_attribute_writable
 from ..resolver import Segment, format_path, is_com_object, parse_path, resolve
 from ..service import VissimService
 from ..worker import WorkerContext
@@ -43,7 +43,8 @@ from ._common import AuditRecord, FlagArg, StringArg, flag, register_tool
 MAX_ATTRIBUTES = 200
 MAX_ATTRIBUTE_NAME_CHARS = 256
 MAX_BULK_ITEMS = 5000
-MAX_TEXT_VALUE_CHARS = 10_000
+#: Large enough for a signal program (base64 Vissig XML in SignalController.IntSupplyData).
+MAX_TEXT_VALUE_CHARS = 500_000
 MAX_INT_VALUE = 2**63 - 1
 #: ``failed`` entries shown in a bulk result (all of them are in the audit record).
 MAX_FAILED_SHOWN = 100
@@ -202,8 +203,11 @@ def attribute_value(value: Any, field: str) -> Any:
     raise _invalid(f"{field} must be a number, a string or a boolean, got {kind}")
 
 
-def write_values(values: Any, allow_path_attrs: bool) -> list[tuple[str, Any]]:
-    """``values`` of vissim_set_attributes as validated ``(name, value)`` pairs (attribute policy applied)."""
+def write_values(
+    values: Any, allow_path_attrs: bool, policy: PathPolicy | None = None
+) -> list[tuple[str, Any]]:
+    """``values`` of vissim_set_attributes as validated ``(name, value)`` pairs (attribute policy applied:
+    with ``policy`` a file/path attribute may point into the allowed directories, else it is refused)."""
     if not isinstance(values, Mapping) or not values:
         raise _invalid("values must be a non-empty object {attribute: new value}")
     if len(values) > MAX_ATTRIBUTES:
@@ -218,8 +222,12 @@ def write_values(values: Any, allow_path_attrs: bool) -> list[tuple[str, Any]]:
                 f"attributes {seen[folded]!r} and {name!r} are the same (names are case-insensitive)"
             )
         seen[folded] = name
-        check_attribute_writable(name, allow_path_attrs)
-        pairs.append((name, attribute_value(raw_value, f"value of {name!r}")))
+        value = attribute_value(raw_value, f"value of {name!r}")
+        if policy is None:
+            check_attribute_writable(name, allow_path_attrs)
+        else:
+            check_attribute_value(name, value, allow_path_attrs, policy)
+        pairs.append((name, value))
     return pairs
 
 
@@ -655,7 +663,8 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         collection (Attributes.GetAll: id, code, name, value_type, editable; at most VISSIM_MAX_ROWS). Use
         id as the attribute name in the other tools (it is the same in every Vissim language and
         case-insensitive: "NUMLANES" = "NumLanes"); code and name are in Vissim's user interface language.
-        Returns: path, interface, members ([{name, kind}], kind = method | property_get | property_put),
+        Returns: path, interface, members ([{name, kind, params}], kind = method | property_get |
+        property_put; params = the parameter names of a method, e.g. AddLink: Key, WktLinestring, LaneWidths),
         and with include_attributes: attributes, attributes_total, attributes_truncated (or
         attributes_error). Without type information but with include_attributes, members is null and
         members_error explains why.
@@ -741,10 +750,12 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         """Write attributes of one object: read the old values, write the new ones, read them back.
 
         Always call it first with dry_run=true, show the old and new values to the user and get approval.
-        Attributes whose name contains File, Path, Folder or Dir are refused (VISSIM_ALLOW_PATH_ATTRS=0). An
-        attribute whose old value cannot be read is not written; earlier writes are not rolled back when a
-        later one fails. Every call - dry runs and refusals too - is written to the audit log. Changes stay in
-        Vissim only: save them with vissim_save_network.
+        An attribute whose name contains File, Path, Folder or Dir accepts only a path inside the allowed
+        directories (e.g. the .sig file of a signal controller), a number, a boolean or an empty value; any
+        other value is refused (ATTRIBUTE_DENIED) unless VISSIM_ALLOW_PATH_ATTRS=1. An attribute whose old
+        value cannot be read is not written; earlier writes are not rolled back when a later one fails. Every
+        call - dry runs and refusals too - is written to the audit log. Changes stay in Vissim only: save
+        them with vissim_save_network.
 
         Parameters: path - object path (e.g. "Net.Links[5]", "Simulation"); values - {attribute: new value}
         (numbers, strings or booleans; at most 200); dry_run - only read the current values.
@@ -761,7 +772,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
             dry_run = flag(dry_run, "dry_run")
             audit.update(dry_run=dry_run)
             segments = parse_path(path)
-            pairs = write_values(values, settings.allow_path_attrs)
+            pairs = write_values(values, settings.allow_path_attrs, service.policy)
             label = format_path(segments)
             audit.update(path=label)
             task = functools.partial(set_attributes_task, segments, pairs, dry_run, progress)

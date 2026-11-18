@@ -22,7 +22,7 @@
    5. Creates <ProjectsDir>\models\original (the read-only folder for original models).
    6. Validates the configuration with "python -X utf8 -P -m vissim_mcp --check" using exactly the environment
       that will be registered.
-   7. MCP stdio smoke test (scripts\mcp_smoke.py): initialize -> tools/list (22 tools) -> vissim_health.
+   7. MCP stdio smoke test (scripts\mcp_smoke.py): initialize -> tools/list (24 tools) -> vissim_health.
    8. Unless -NoRegister: registers the server with Claude Code (scripts\register_claude.py ->
       "claude mcp add-json vissim <json> -s <Scope>"). User scope = available in every folder, survives reboots,
       no project approval prompt.

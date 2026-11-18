@@ -58,6 +58,7 @@ from typing import Any
 
 from .config import MAX_SIM_PERIOD_S, Settings
 from .errors import ErrorCode, VissimMcpError, from_com_error, is_com_error, is_connection_error
+from .messages import error_file_messages, log_messages
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,21 @@ HISTORY_SIZE = 20
 MULTI_RUN_WARNING = (
     "ensure evaluation keeps previous runs (Evaluation attribute KeepPrevResults, docs/com-names.md); "
     "otherwise only the results of the last run remain"
+)
+#: Root attributes naming the network file (real Vissim 2026: "net1.inpx" and its folder; "" without a file).
+INPUT_FILE_ATTR = "InputFile"
+WORKING_FOLDER_ATTR = "WorkingFolder"
+NO_FILE_HINT = (
+    "Save the network first with vissim_save_network(save_as=...): Vissim starts a simulation only for a "
+    "network that has a file - otherwise it opens a 'Save as' dialog and COM hangs."
+)
+#: Real Vissim 2026 (M6): once a run could not be started, later runs in the same session fail with "could
+#: not initialise the simulation run" even after the cause is fixed and after Stop(); loading the corrected
+#: network from its file makes it run again.
+RUN_FAILED_HINT = (
+    "Fix the cause Vissim reported, save with vissim_save_network and load that file again with "
+    "vissim_load_network before the next vissim_start_simulation: after a failed start Vissim often cannot "
+    "start another run until the network is reloaded."
 )
 KEEP_RESULTS_ATTR = "KeepPrevResults"
 #: ``Evaluation.KeepPrevResults`` values that keep the results of every run: real Vissim 2026 returns the
@@ -216,6 +232,7 @@ class SimulationJob:
         self.seed_attr = seed_attr
         self.stop_requested = False
         self.started_at = time.monotonic()
+        self.created_wall = time.time()
         self.created = _now_iso()
         self.run_started_at = self.started_at
         self.run_wall_s: list[float] = []
@@ -323,11 +340,22 @@ class SimulationJob:
         try:
             self._step(vissim.Simulation, settings)
         except VissimMcpError as err:
-            self.fail(err.to_dict())
+            self.fail(self._with_messages(err, vissim))
         except Exception as exc:
             if not is_com_error(exc) or is_connection_error(exc):
                 raise
-            self.fail(from_com_error(exc, context=f"simulation job {self.id}, run {self.run}").to_dict())
+            error = from_com_error(exc, context=f"simulation job {self.id}, run {self.run}")
+            error.hint = RUN_FAILED_HINT
+            self.fail(self._with_messages(error, vissim))
+
+    def _with_messages(self, error: VissimMcpError, vissim: Any) -> dict[str, Any]:
+        """The error as a dict, with what Vissim wrote to its error file for this job (when there is one)."""
+        data = error.to_dict()
+        messages = vissim_messages(vissim, self.created_wall)
+        if messages:
+            data["details"] = {**(data.get("details") or {}), "vissim_messages": messages}
+            data["message"] = f"{data.get('message')} - Vissim reported: {messages[0]}"
+        return data
 
     def _step(self, simulation: Any, settings: Settings) -> None:
         if self.stop_requested:
@@ -619,6 +647,28 @@ def _read_step(simulation: Any) -> float | None:
     return 1.0 / resolution
 
 
+def _root_text(vissim: Any, name: str) -> str | None:
+    """A text attribute of the Vissim root object; None when it cannot be read (unknown)."""
+    try:
+        value = vissim.AttValue(name)
+    except Exception as exc:
+        if is_connection_error(exc):
+            raise
+        return None
+    return str(value).strip() if value is not None else ""
+
+
+def vissim_messages(vissim: Any, since: float) -> list[str]:
+    """What Vissim reported for a run that could not start or continue since ``since`` (``time.time()``): the
+    lines of its ``<network>*.err`` file (e.g. "signal groups ... differ from those in the external data
+    files"), else the new lines of its message log. Best effort: ``[]`` when nothing is found."""
+    try:
+        folder, name = _root_text(vissim, WORKING_FOLDER_ATTR), _root_text(vissim, INPUT_FILE_ATTR)
+    except Exception:
+        folder, name = None, None
+    return error_file_messages(folder, name, since) or log_messages(since)
+
+
 def _read_keep_results(vissim: Any) -> str | None:
     """``Evaluation.KeepPrevResults`` as text, None when it cannot be read (the caller then warns)."""
     try:
@@ -657,6 +707,10 @@ def prepare_job(registry: JobRegistry, request: StartRequest, settings: Settings
     if outside:
         raise _invalid(
             f"pause_at values must lie strictly between 0 and the period ({_num(period)} s): {outside}"
+        )
+    if _root_text(ctx.vissim, INPUT_FILE_ATTR) == "":
+        raise _invalid(
+            "the network in Vissim has no file yet (it is new or was never saved)", hint=NO_FILE_HINT
         )
     warnings: list[str] = []
     simsec = float(simulation.AttValue("SimSec") or 0.0)

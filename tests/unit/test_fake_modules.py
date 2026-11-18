@@ -255,12 +255,12 @@ def test_type_info_members(fake_backend: FakeBackend, fake_vissim: FakeVissim) -
     assert members == sorted(members, key=lambda m: (m["name"], m["kind"]))
     names = {m["name"] for m in members}
     assert {"QueryInterface", "AddRef", "Invoke", "GetTypeInfo"}.isdisjoint(names)
-    assert {"name": "LoadNet", "kind": "method"} in members
+    assert {"name": "LoadNet", "kind": "method", "params": ["path", "additive"]} in members
     assert {"name": "Net", "kind": "property_get"} in members
     link_members = fake_backend.type_info_members(fake_vissim.Net.Links.ItemByKey(1))
     assert {"name": "AttValue", "kind": "property_get"} in link_members
     assert {"name": "AttValue", "kind": "property_put"} in link_members
-    assert {"name": "SetAttValue", "kind": "method"} in link_members
+    assert {"name": "SetAttValue", "kind": "method", "params": ["attribute", "value"]} in link_members
     collection_members = {m["name"] for m in fake_backend.type_info_members(fake_vissim.Net.Links)}
     assert {"Count", "ItemByKey", "GetMultipleAttributes", "Attributes"} <= collection_members
 

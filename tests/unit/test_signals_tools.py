@@ -7,10 +7,12 @@ records.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 import pytest
 from mcp.server.fastmcp import FastMCP
@@ -246,3 +248,118 @@ async def test_no_simulation_run_in_progress_is_explained(
         assert "pause_at" in result["error"]["hint"]
     records = audit_records(isolated_env["audit"], "vissim_set_signal_state")
     assert [r["old"] for r in records] == [{"SigState": None, "ContrByCOM": None}] * 2
+
+
+# --- vissim_set_signal_program
+
+PROGRAM = "vissim_set_signal_program"
+
+
+def _decoded(h: Harness, sc_no: int = 1) -> str:
+    stored = h.vissim.attribute("SignalControllers", sc_no, "IntSupplyData")
+    return base64.b64decode(stored).decode("utf-8")
+
+
+async def test_signal_program_is_written_as_vissig_xml(
+    harness: MakeHarness, isolated_env: dict[str, Path]
+) -> None:
+    h, mcp = await connected(harness)
+    existing = sorted(h.vissim.collection(SGS)._all())
+    groups = [
+        {"sg_no": no, "green_start_s": 5 * index, "green_end_s": 5 * index + 4}
+        for index, no in enumerate(existing)
+    ]
+    groups.append({"sg_no": 90, "green_start_s": 50, "green_end_s": 10})  # a new group; green wraps around
+    result = await call(mcp, PROGRAM, {"sc_no": 1, "cycle_s": 60, "groups": groups})
+    assert result["ok"] is True, result
+    assert result["created_groups"] == [90] and result["stored"] is True and result["ProgNo"] == 1
+    assert result["cycle_s"] == 60 and result["amber_s"] == 3 and result["red_amber_s"] == 1
+    assert result["groups"][-1] == {"sg_no": 90, "green_start_s": 50.0, "green_end_s": 10.0}
+    assert 90 in h.vissim.collection(SGS)._all()
+
+    xml = _decoded(h)
+    root = ElementTree.fromstring(xml.encode("utf-8"))
+    assert root.tag == "sc" and root.get("id") == "1"
+    (prog,) = root.findall("./progs/prog")
+    assert prog.get("id") == "1" and prog.get("cycletime") == "60000"
+    assert [sg.get("id") for sg in root.findall("./sgs/sg")] == [str(no) for no in [*existing, 90]]
+    wrapped = prog.find("./sgs/sg[@sg_id='90']")
+    assert wrapped is not None
+    commands = {cmd.get("display"): cmd.get("begin") for cmd in wrapped.findall("./cmds/cmd")}
+    # green begins at 50 s; red begins when the 3 s of amber after the end of green (10 s) are over
+    assert commands == {"3": "50000", "1": "13000"}
+    fixed = {
+        state.get("display"): state.get("duration") for state in wrapped.findall("./fixedstates/fixedstate")
+    }
+    assert fixed == {"2": "1000", "4": "3000"}
+    assert "\r\n" in xml
+
+    (record,) = audit_records(isolated_env["audit"], PROGRAM)
+    assert record["ok"] is True and record["created_groups"] == [90]
+    assert record["written"] == ["IntSupplyData", "ProgNo"] and record["old"]["program_chars"] == 0
+
+
+async def test_signal_program_dry_run_and_refusals(
+    harness: MakeHarness, isolated_env: dict[str, Path]
+) -> None:
+    h, mcp = await connected(harness)
+    existing = sorted(h.vissim.collection(SGS)._all())
+    full = [{"sg_no": no, "green_start_s": 0, "green_end_s": 20} for no in existing]
+    dry = await call(
+        mcp,
+        PROGRAM,
+        {
+            "sc_no": 1,
+            "cycle_s": 60,
+            "groups": [*full, {"sg_no": 77, "green_start_s": 30, "green_end_s": 50}],
+            "dry_run": True,
+        },
+    )
+    assert dry["ok"] is True and dry["dry_run"] is True and dry["created_groups"] == [77]
+    assert "stored" not in dry and 77 not in h.vissim.collection(SGS)._all()
+    assert h.vissim.attribute("SignalControllers", 1, "IntSupplyData") == ""
+
+    incomplete = await call(mcp, PROGRAM, {"sc_no": 1, "cycle_s": 60, "groups": full[:1]})
+    assert incomplete["error"]["code"] == "INVALID_ARGUMENT"
+    assert "are not in groups" in incomplete["error"]["message"]
+    unknown = await call(mcp, PROGRAM, {"sc_no": 99, "cycle_s": 60, "groups": full})
+    assert unknown["error"]["code"] == "RESOLVE_FAILED"
+    bad: list[dict[str, Any]] = [
+        {"sc_no": 1, "cycle_s": 0, "groups": full},
+        {"sc_no": 1, "cycle_s": "60", "groups": full},
+        {"sc_no": 1, "cycle_s": 60, "groups": []},
+        {"sc_no": 1, "cycle_s": 60, "groups": [{"sg_no": 1, "green_start_s": 5}]},
+        {"sc_no": 1, "cycle_s": 60, "groups": [{"sg_no": 1, "green_start_s": 5, "green_end_s": 5}]},
+        {"sc_no": 1, "cycle_s": 60, "groups": [{"sg_no": 1, "green_start_s": 5, "green_end_s": 70}]},
+        {"sc_no": 1, "cycle_s": 60, "groups": [{"sg_no": 1, "green_start_s": 0, "green_end_s": 58}]},
+        {"sc_no": 1, "cycle_s": 60, "groups": [full[0], full[0]]},
+        {"sc_no": 1, "cycle_s": 60, "groups": full, "amber_s": -1},
+        {"sc_no": 0, "cycle_s": 60, "groups": full},
+    ]
+    for arguments in bad:
+        refused = await call(mcp, PROGRAM, arguments)
+        assert refused["error"]["code"] == "INVALID_ARGUMENT", (arguments, refused)
+    assert h.vissim.attribute("SignalControllers", 1, "IntSupplyData") == ""
+    assert all(r["ok"] is False for r in audit_records(isolated_env["audit"], PROGRAM)[1:])
+
+
+async def test_signal_program_is_refused_while_a_job_is_active(harness: MakeHarness) -> None:
+    h, mcp = await connected(harness)
+    h.vissim.set_simulation_attribute("SimPeriod", 600)
+    assert (await call(mcp, "vissim_start_simulation", {"runs": 1, "pause_at": [100]}))["ok"] is True
+    groups = [
+        {"sg_no": no, "green_start_s": 0, "green_end_s": 20} for no in sorted(h.vissim.collection(SGS)._all())
+    ]
+    refused = await call(mcp, PROGRAM, {"sc_no": 1, "cycle_s": 60, "groups": groups})
+    assert refused["error"]["code"] == "JOB_RUNNING"
+    await call(mcp, "vissim_stop_simulation")
+
+
+def test_program_xml_escapes_names() -> None:
+    xml = signals.fixed_time_program_xml(
+        3, 'Main "A" & <B>', 90000, [signals.GroupTimes(1, 0, 30000)], {1: "North & 'South'"}, 3000, 0
+    )
+    root = ElementTree.fromstring(xml.encode("utf-8"))
+    assert root.get("name") == 'Main "A" & <B>' and root.get("id") == "3"
+    assert root.find("./sgs/sg").get("name") == "North & 'South'"  # type: ignore[union-attr]
+    assert root.find("./progs/prog").get("cycletime") == "90000"  # type: ignore[union-attr]

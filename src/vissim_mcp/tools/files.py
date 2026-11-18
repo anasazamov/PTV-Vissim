@@ -23,6 +23,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from ..errors import ErrorCode, VissimMcpError, describe_exception, is_com_error, is_connection_error
+from ..messages import log_messages
 from ..policy import LOAD_LAYOUT_EXT, LOAD_NET_EXT, SAVE_EXT, PathPolicy, make_backup
 from ..service import VissimService
 from ..worker import WorkerContext
@@ -191,6 +192,7 @@ def register(mcp: FastMCP, service: VissimService) -> None:
                 warnings.append(READ_ONLY_LOAD_WARNING)
             generation = service.generation
             started = time.monotonic()
+            started_wall = time.time()
             task = functools.partial(
                 load_network_task, str(inpx), str(layx) if layx is not None else None, bool(additive)
             )
@@ -198,9 +200,17 @@ def register(mcp: FastMCP, service: VissimService) -> None:
                 data = await service.call(
                     task, timeout_s=settings.load_timeout_s, task_name="vissim_load_network"
                 )
-            except VissimMcpError:
+            except VissimMcpError as err:
                 if service.generation == generation:
                     service.note_load_failed(str(inpx), additive=bool(additive))
+                if err.code is ErrorCode.COM_ERROR:
+                    # "The network file could not be loaded." - the reason (a license limit, a missing
+                    # file, a newer file version) is only in Vissim's message log.
+                    reported = await asyncio.to_thread(log_messages, started_wall)
+                    if reported:
+                        err.details = {**(err.details or {}), "vissim_messages": reported}
+                        err.message = f"{err.message} - Vissim reported: {reported[0]}"
+                        err.hint = "See details.vissim_messages for what Vissim wrote to its message log."
                 raise
             if service.generation == generation:
                 service.remember_loaded(str(inpx), additive=bool(additive))

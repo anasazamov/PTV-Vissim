@@ -8,7 +8,7 @@ docs/m6-runbook.md.
 - Kompyuter: `DESKTOP-88D92K2`, Windows 11 Pro 10.0.26200 (rus lokali, ANSI kod sahifasi 1251)
 - Vissim: **PTV Vissim Academic 2026 (SP 10)**, `C:\Program Files\PTV Vision\PTV Vissim 2026\Exe\Vissim260.exe`,
   interfeys tili — ruscha
-- Python 3.12.10 64-bit (`D:\PTV-Vissim\.venv`), mcp 1.30.0, pywin32 312; server `1.0.0rc2`
+- Python 3.12.10 64-bit (`D:\PTV-Vissim\.venv`), mcp 1.30.0, pywin32 312; server `1.1.0rc1`
 - Litsenziya: Academic — CodeMeter ro'yxatida `PTV Base License (UFC 6000459)` (yonida `PTV Vissim (Demo)`); COM
   orqali ishlaydi. Sinov paytida loyiha egasining 2–3 ta interaktiv Vissim oynasi ham ochiq edi — ularga tegilmadi.
 - Model: `Examples Training\COM\Basic Commands\COM Basic Commands.inpx` ning vaqtinchalik nusxasi
@@ -28,13 +28,20 @@ Yakuniy ishga tushirish (barcha tuzatishlardan keyin):
 
 ```text
 > python -X utf8 -m pytest -p no:cacheprovider tests\real -m vissim --vissim-com-license -rA --vissim-results docs\m6-real-results.jsonl
-11 passed, 1 skipped in 570.82s (0:09:30)
+13 passed, 3 skipped in 681.16s (0:11:21)          (server 1.1.0rc1, 24 ta tool)
 SKIPPED: test_modal_dialog_gives_timeout_hung_and_restart_recovers (qo'lda qadam, --vissim-manual -s kerak)
+SKIPPED: test_large_model_workflow[mainz-motorway]  - Vissim rad etdi: tarmoq hajmi 10000 m dan katta (litsenziya)
+SKIPPED: test_large_model_workflow[boise-signals]   - Vissim rad etdi: 20 tadan ko'p svetofor kontrolleri (litsenziya)
 > python -X utf8 scripts\probe_com_names.py --i-have-a-com-license --update
 chiqish kodi 0; 32 ta nom verified
 > python -X utf8 -m pytest -p no:cacheprovider -q        (soxta COM qatlami)
-981 passed, 1 skipped, 12 deselected; ruff toza
+1016 passed, 1 skipped, 16 deselected; ruff toza
 ```
+
+Shu yakuniy ishga tushirishda smoke testining `vissim_connect` i birinchi urinishda litsenziya dialogiga uchradi va
+ikkinchi urinishda ulandi (`attempts: 2`, 40,6 s) — 4-topilmadagi qayta urinish amalda ishladi.
+
+Birinchi o'tkazish (server 1.0.0rc2, 22 ta tool): 11 passed, 1 skipped (570,82 s).
 
 Kuzatuvlar (har bir test yozgan qiymatlar): `docs/m6-real-results.jsonl`.
 
@@ -60,6 +67,27 @@ Kodni o'zgartirishni talab qilmagan natijalar: `VISSIM_BREAK_DISABLE_VALUE=0` va
 `IsSimBreakAtActive` ni yozish kerak emas (`SimBreakAt` yozilganda o'zi yoqiladi); `ItemByKey("1")` ishlaydi; Job Object
 flag'lari yetarli; `Exit()` 3,7–6 s da toza yopadi.
 
+### M6 dan keyingi kengaytma (2026-11-18): loyihani to'liq MCP orqali bajarish
+
+Birinchi M6 o'tkazilgandan keyin ikki kamchilik qolgan edi: tarmoq qurish imkoni yo'qligi va faqat 34 havolali
+modelda sinalgani. Ikkalasi ham bartaraf etildi va haqiqiy Vissim'da tekshirildi.
+
+| # | Nima qilindi | Haqiqiy Vissim'dagi natija |
+|---|---|---|
+| 11 | Yangi tool `vissim_call_method`: tarmoqni tahrirlovchi COM metodlari (`Add…`, `Remove…`, `Duplicate…` ..., ildizda `New`), obyekt argumentlari `{"ref": yo'l}`, ruxsat ro'yxati, audit | `test_real_build_network.py`: `New` → 3 havola → 2 ulagich → oqim 1200 avt/soat → marshrutlar 3:1 → o'lchovlar → saqlash → 600 s simulyatsiya: ma'lumot yig'ish nuqtasidan 69, sayohat vaqti o'lchovidan 133 avtomobil o'tdi (o'rtacha 25,1 s) |
+| 12 | Yangi tool `vissim_set_signal_program`: qat'iy vaqtli kontroller dasturini (Vissig XML) tuzib `IntSupplyData` ga yozadi | Sikl 60 s, yashil 10–30 s: kuzatilgan holatlar 5 s `RED`, 9 `REDAMBER`, 20 `GREEN`, 31 `AMBER`, 34 `RED`, 80 `GREEN`, 100 `RED` — dasturga aynan mos |
+| 13 | `vissim_describe` metodlarning parametr nomlarini qaytaradi | `AddLink` → `Key, WktLinestring, LaneWidths` |
+| 14 | Fayli yo'q (yangi) tarmoqda `vissim_start_simulation` rad etiladi | Avval Vissim "Saqlash" dialogini ochib, COM 120 s osilib qolardi; endi darhol `INVALID_ARGUMENT` va "avval saqlang" maslahati |
+| 15 | Vissim'ning o'z xabarlari xatoga qo'shiladi (`details.vissim_messages`): `.err` fayli va `vissim_msgs.txt` | Dasturi yo'q kontroller: "The signal groups defined in Vissim are different from those in the external data files"; yuklanmagan tarmoq: litsenziya cheklovi matni |
+| 16 | Run boshlanmay qolgandan keyin keyingi runlar ham yiqilishi (Vissim xususiyati) aniqlandi | Xato maslahati: sababni tuzatish → saqlash → `vissim_load_network`; shu yo'l bilan run qayta ishladi |
+| 17 | `TIMEOUT_HUNG` xabarida Vissim'ning ochiq oynalari ko'rsatiladi | Modal dialog holati ("Файл сохранить как") haqiqiy Vissim'da kuzatildi — C2 qadamining mohiyati (dialog → `TIMEOUT_HUNG`) shu bilan tasdiqlandi |
+| 18 | Fayl/yo'l atributlariga ruxsat etilgan papka ichidagi yo'lni yozish mumkin; matn qiymati chegarasi 10 000 → 500 000 belgi | (soxta qatlamda tekshirilgan) |
+| 19 | Katta model testi `test_real_large_model.py` | **Karlsruhe 3D** (8,4 MB, 2579 havola, 19 kontroller, 98 svetofor boshi): yuklash 13,8 s; barcha havolalarni 6 sahifada o'qish 0,14 s; 900 s simulyatsiya 20 s; 600-soniyada 217 avtomobil ro'yxati va CSV eksport; `vissim_health` < 1 ms; nusxasi saqlandi. **Mainz** va **Boise** — Vissim litsenziya cheklovi bilan rad etdi (pastga qarang) |
+
+Academic litsenziya cheklovlari (Vissim'ning o'z xabarlari): tarmoq hajmi **10 000 m** dan, svetofor kontrollerlari
+soni **20** tadan oshmasligi kerak. `Mainz - Static Routes` birinchisiga, `Signalization Boise` ikkinchisiga
+tushdi. Bu server kamchiligi emas, lekin kattaroq loyihalar uchun to'liq litsenziya kerakligini bildiradi.
+
 ### Ochiq qolganlar
 
 - **Qo'lda qadamlar C1, C2, C3** (docs/m6-runbook.md, 4-bo'lim) o'tkazilmagan: ular loyiha egasining harakatini talab
@@ -68,7 +96,12 @@ flag'lari yetarli; `Exit()` 3,7–6 s da toza yopadi.
 - Litsenziya dialogining sababi aniqlanmagan (4-topilma) — faqat qayta urinish bilan yumshatilgan.
 - Probe'dagi `stale_break` tajribasi natijani `paused_at_0.0` deb yozadi; aslida run oxirigacha borgan (`SimSec=0`,
   `IsRunning=0`). Bu faqat probe hisobotidagi yorliq, serverga ta'sir qilmaydi.
-- Faqat bitta model (`COM Basic Commands`, 34 ta havola) va bitta Vissim versiyasi/tili bilan sinalgan.
+- Bitta Vissim versiyasi/tili bilan sinalgan. Modellar: `COM Basic Commands` (34 havola), `Karlsruhe 3D` (2579
+  havola) va noldan qurilgan chorraha. 10 000 m dan katta yoki 20 tadan ko'p kontrollerli tarmoqlar litsenziya
+  sababli sinalmadi; soatlab davom etadigan real yuklama ham sinalmagan (Karlsruhe'da 900 s — 20 s).
+- `vissim_call_method` orqali ochiladigan metodlarning hammasi ham sinalmagan (docs/com-names.md, "Tarmoq qurish
+  metodlari"): jamoat transporti, piyodalar, to'xtash joylari, ustuvorlik qoidalari va h.k.
+- Svetofor: faqat qat'iy vaqtli dastur; to'qnashuvchi yashillar va oraliq vaqtlar tekshirilmaydi.
 
 ---
 
@@ -142,9 +175,10 @@ Buyruqlar (repozitoriya ildizida):
 .\.venv\Scripts\python.exe -X utf8 -m ruff check src tests scripts
 ```
 
-Natija (2026-11-18, M6 tuzatishlaridan keyin): **981 passed, 1 skipped, 12 deselected** (~90 s); ruff toza.
+Natija (2026-11-18, M6 tuzatishlari va kengaytmadan keyin): **1016 passed, 1 skipped, 16 deselected** (~90 s);
+ruff toza.
 Skip: `tests/unit/test_policy.py::test_symlink_escape_is_denied` — bu kompyuterda symlink yaratish uchun huquq yo'q
-(`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 12 deselected — `tests/real`.
+(`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 16 deselected — `tests/real`.
 2026-10-27 dagi (M6 tayyorgarlik) natija: 908 passed; M7 dan keyin 970.
 
 Bosqichlar tarixi (commit'lar bo'yicha):

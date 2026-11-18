@@ -11,9 +11,13 @@ Every call writes one audit record with the old and the new values (PLAN 6.8).
 
 from __future__ import annotations
 
+import base64
 import functools
 import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Annotated, Any
+from xml.sax.saxutils import quoteattr
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import WithJsonSchema
@@ -182,6 +186,243 @@ def set_signal_task(
     }
     return {"path": label, "old": progress["old"], "new": progress["new"], "errors": {**errors, **after}}
 
+# --- fixed-time signal program (EXTENSION after M6): vissim_set_signal_program
+
+#: Vissim keeps the program of a fixed-time controller as Vissig XML, base64-encoded, in this attribute (the
+#: "internal supply data" - no .sig file needed; verified with real Vissim 2026).
+SUPPLY_ATTR = "IntSupplyData"
+PROGRAM_ATTR = "ProgNo"
+PROGRAM_NO = 1
+MAX_GROUPS = 200
+MIN_CYCLE_S = 2.0
+MAX_CYCLE_S = 3600.0
+MAX_TRANSITION_S = 30.0
+PROGRAM_HINT = (
+    'E.g. vissim_set_signal_program(sc_no=1, cycle_s=60, groups=[{"sg_no": 1, "green_start_s": 0, '
+    '"green_end_s": 25}, {"sg_no": 2, "green_start_s": 30, "green_end_s": 55}]). Times are seconds within '
+    "the cycle; a green may wrap around the end of the cycle."
+)
+
+GroupsArg = Annotated[Any, WithJsonSchema({"type": "array", "items": {"type": "object"}})]
+NumberArg = Annotated[Any, WithJsonSchema({"type": "number"})]
+
+_DISPLAYS = """  <signaldisplays>
+    <display id="1" name="Red" state="RED">
+      <patterns>
+        <pattern pattern="MINUS" color="#FF0000" isBold="true" />
+      </patterns>
+    </display>
+    <display id="2" name="Red/Amber" state="REDAMBER">
+      <patterns>
+        <pattern pattern="FRAME" color="#CCCC00" isBold="true" />
+        <pattern pattern="SLASH" color="#CC0000" isBold="false" />
+        <pattern pattern="MINUS" color="#CC0000" isBold="false" />
+      </patterns>
+    </display>
+    <display id="3" name="Green" state="GREEN">
+      <patterns>
+        <pattern pattern="FRAME" color="#00CC00" isBold="true" />
+        <pattern pattern="SOLID" color="#00CC00" isBold="false" />
+      </patterns>
+    </display>
+    <display id="4" name="Amber" state="AMBER">
+      <patterns>
+        <pattern pattern="FRAME" color="#CCCC00" isBold="true" />
+        <pattern pattern="SLASH" color="#CCCC00" isBold="false" />
+      </patterns>
+    </display>
+  </signaldisplays>
+"""
+
+
+@dataclass(frozen=True)
+class GroupTimes:
+    """Green of one signal group within the cycle, in milliseconds."""
+
+    no: int
+    green_start_ms: int
+    green_end_ms: int
+
+
+def _milliseconds(value: Any, field: str, low: float, high: float) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise _invalid(f"{field} must be a number of seconds, got {value!r}", PROGRAM_HINT)
+    if not low <= value <= high:
+        raise _invalid(f"{field} must be between {low:g} and {high:g} s, got {value:g}", PROGRAM_HINT)
+    return int(round(float(value) * 1000))
+
+
+def program_groups(groups: Any, cycle_ms: int, amber_ms: int, red_amber_ms: int) -> list[GroupTimes]:
+    """``groups`` of vissim_set_signal_program, validated against the cycle."""
+    if not isinstance(groups, (list, tuple)) or not groups:
+        raise _invalid(
+            "groups must be a non-empty array of {sg_no, green_start_s, green_end_s}", PROGRAM_HINT
+        )
+    if len(groups) > MAX_GROUPS:
+        raise _invalid(f"at most {MAX_GROUPS} signal groups, got {len(groups)}")
+    cycle_s = cycle_ms / 1000
+    parsed: list[GroupTimes] = []
+    seen: set[int] = set()
+    for index, item in enumerate(groups):
+        field = f"groups[{index}]"
+        if not isinstance(item, dict) or set(item) != {"sg_no", "green_start_s", "green_end_s"}:
+            raise _invalid(
+                f"{field} must be an object with sg_no, green_start_s and green_end_s", PROGRAM_HINT
+            )
+        number = object_number(item["sg_no"], f"{field}.sg_no")
+        if number in seen:
+            raise _invalid(f"{field}: signal group {number} is listed twice")
+        seen.add(number)
+        start = _milliseconds(item["green_start_s"], f"{field}.green_start_s", 0, cycle_s)
+        end = _milliseconds(item["green_end_s"], f"{field}.green_end_s", 0, cycle_s)
+        start, end = start % cycle_ms, end % cycle_ms
+        green = (end - start) % cycle_ms
+        if green == 0:
+            raise _invalid(f"{field}: green_start_s and green_end_s are the same moment of the cycle")
+        if green + amber_ms + red_amber_ms >= cycle_ms:
+            raise _invalid(
+                f"{field}: green ({green / 1000:g} s) plus amber and red/amber leaves no red in a cycle of "
+                f"{cycle_s:g} s"
+            )
+        parsed.append(GroupTimes(number, start, end))
+    return sorted(parsed, key=lambda group: group.no)
+
+
+def fixed_time_program_xml(
+    sc_no: int,
+    sc_name: str,
+    cycle_ms: int,
+    groups: Sequence[GroupTimes],
+    names: Mapping[int, str],
+    amber_ms: int,
+    red_amber_ms: int,
+) -> str:
+    """Vissig XML of one fixed-time program (id 1): red -> red/amber -> green -> amber -> red per group.
+
+    Layout taken from a network saved by Vissim 2026 and verified by running it (M6): in ``<cmds>`` the green
+    command is the moment green begins (red/amber is shown for ``red_amber_ms`` before it) and the red
+    command the moment red begins - amber is shown for ``amber_ms`` before that, i.e. from ``green_end``.
+    """
+    group_list = "".join(
+        f'    <sg id="{group.no}" name={quoteattr(names.get(group.no, ""))} defaultSignalSequence="3" '
+        'underEPICSControl="true">\n      <defaultDurations />\n      <EPICSTrafficDemands />\n    </sg>\n'
+        for group in groups
+    )
+    program = "".join(
+        f'        <sg sg_id="{group.no}" signal_sequence="3">\n'
+        "          <cmds>\n"
+        f'            <cmd display="3" begin="{group.green_start_ms}" />\n'
+        f'            <cmd display="1" begin="{(group.green_end_ms + amber_ms) % cycle_ms}" />\n'
+        "          </cmds>\n"
+        "          <fixedstates>\n"
+        f'            <fixedstate display="2" duration="{red_amber_ms}" />\n'
+        f'            <fixedstate display="4" duration="{amber_ms}" />\n'
+        "          </fixedstates>\n"
+        "        </sg>\n"
+        for group in groups
+    )
+    sequence = (
+        '    <signalsequence id="3" name="Red-Red/Amber-Green-Amber">\n'
+        '      <state display="1" isFixedDuration="false" isClosed="true" defaultDuration="1000" />\n'
+        '      <state display="2" isFixedDuration="true" isClosed="true" '
+        f'defaultDuration="{red_amber_ms}" />\n'
+        '      <state display="3" isFixedDuration="false" isClosed="false" defaultDuration="5000" />\n'
+        f'      <state display="4" isFixedDuration="true" isClosed="true" defaultDuration="{amber_ms}" />\n'
+        "    </signalsequence>\n"
+    )
+    text = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<sc id="{sc_no}" name={quoteattr(sc_name)} frequency="1" steps="0" defaultIntergreenMatrix="0">\n'
+        f"{_DISPLAYS}"
+        f"  <signalsequences>\n{sequence}  </signalsequences>\n"
+        f"  <sgs>\n{group_list}  </sgs>\n"
+        "  <dets />\n  <messagePointPairs />\n  <intergreenmatrices />\n"
+        "  <progs>\n"
+        f'    <prog id="{PROGRAM_NO}" cycletime="{cycle_ms}" switchpoint="0" offset="0" intergreens="0" '
+        f'fitness="0.000000" vehicleCount="0" name="Program {PROGRAM_NO} ({cycle_ms / 1000:g} s)">\n'
+        f"      <sgs>\n{program}      </sgs>\n"
+        "    </prog>\n"
+        "  </progs>\n"
+        "  <stages />\n  <interstageProgs />\n  <stageProgs />\n  <dailyProgLists />\n"
+        "</sc>\n"
+    )
+    return text.replace("\n", "\r\n")
+
+
+def set_program_task(
+    sc_no: int,
+    cycle_ms: int,
+    groups: list[GroupTimes],
+    amber_ms: int,
+    red_amber_ms: int,
+    dry_run: bool,
+    service: VissimService,
+    progress: dict[str, Any],
+    ctx: WorkerContext,
+) -> dict[str, Any]:
+    """Create missing signal groups, build the program and write it to the controller."""
+    job = service.active_job()
+    if job is not None:
+        raise job_running_error(job)
+    segments = [Segment("Net"), Segment("SignalControllers", sc_no)]
+    label = format_path(segments)
+    controller = resolve_path(ctx.vissim, segments)
+    _require_object(controller, label)
+    collection = controller.SGs
+    rows = collection.GetMultipleAttributes(("No", "Name"))
+    names = {int(row[0]): str(row[1] or "") for row in rows or ()}
+    wanted = [group.no for group in groups]
+    extra = sorted(set(names) - set(wanted))
+    if extra:
+        raise _invalid(
+            f"signal group(s) {extra} of {label} are not in groups: Vissim refuses a program that does not "
+            "cover every signal group of the controller",
+            hint="Add green times for them, or remove them with vissim_call_method (RemoveSignalGroup).",
+        )
+    missing = [number for number in wanted if number not in names]
+    errors: dict[str, str] = {}
+    old_supply = _read(controller, SUPPLY_ATTR, errors)
+    progress["old"] = {
+        PROGRAM_ATTR: _read(controller, PROGRAM_ATTR, errors),
+        "program_chars": len(old_supply) if isinstance(old_supply, str) else None,
+    }
+    controller_name = _read(controller, "Name", errors)
+    xml = fixed_time_program_xml(
+        sc_no,
+        controller_name if isinstance(controller_name, str) else "",
+        cycle_ms,
+        groups,
+        names,
+        amber_ms,
+        red_amber_ms,
+    )
+    encoded = base64.b64encode(xml.encode("utf-8")).decode("ascii")
+    result: dict[str, Any] = {
+        "path": label,
+        "created_groups": missing,
+        "controller_type": _read(controller, "Type", errors),
+        "program_chars": len(encoded),
+    }
+    if dry_run:
+        return result
+    for number in missing:
+        try:
+            collection.AddSignalGroup(number)
+        except Exception as exc:
+            if is_connection_error(exc) or not is_com_error(exc):
+                raise
+            raise from_com_error(exc, context=f"{label}.SGs.AddSignalGroup({number})") from None
+        progress.setdefault("created_groups", []).append(number)
+    _write(controller, SUPPLY_ATTR, encoded, label, None)
+    progress.setdefault("written", []).append(SUPPLY_ATTR)
+    _write(controller, PROGRAM_ATTR, PROGRAM_NO, label, None)
+    progress["written"].append(PROGRAM_ATTR)
+    after: dict[str, str] = {}
+    written_back = _read(controller, SUPPLY_ATTR, after)
+    result["stored"] = isinstance(written_back, str) and written_back == encoded
+    result[PROGRAM_ATTR] = _read(controller, PROGRAM_ATTR, after)
+    return result
+
 
 # --- tool
 
@@ -282,5 +523,113 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         settings=settings,
         read_only=False,
         destructive=False,
+        idempotent=True,
+    )
+
+    async def vissim_set_signal_program(
+        sc_no: IntArg,
+        cycle_s: NumberArg,
+        groups: GroupsArg,
+        amber_s: NumberArg = 3,
+        red_amber_s: NumberArg = 1,
+        dry_run: FlagArg = False,
+    ) -> dict[str, Any]:
+        """Give a fixed-time signal controller its signal program: the cycle time and the green of every
+        signal group. A new signal controller needs this before a simulation can run (without a program
+        Vissim refuses the run: "signal groups ... differ from those in the external data files").
+
+        The program replaces the controller's current one and is stored inside the network (no .sig file).
+        Each group is red, shows red/amber for red_amber_s before its green, is green from green_start_s to
+        green_end_s and then amber for amber_s. Signal groups that do not exist yet are created; every
+        existing signal group of the controller must be listed. Assign signal heads to groups with
+        vissim_set_attributes (attribute SG = "<controller no>-<group no>"). Conflicting greens are not
+        checked - choose the times so that conflicting movements are never green together, with intergreen
+        time between them. Not allowed while a simulation job is running or paused. Written to the audit log.
+
+        Parameters: sc_no - signal controller number; cycle_s - cycle time in seconds; groups -
+        [{sg_no, green_start_s, green_end_s}], seconds within the cycle (a green may wrap around the end of
+        the cycle); amber_s (default 3) and red_amber_s (default 1) - transition times, 0 = none; dry_run -
+        true only validates and reports what would be created.
+        Returns: sc_no, path, cycle_s, groups, amber_s, red_amber_s, dry_run, created_groups, ProgNo,
+        stored (the program was read back unchanged), program_chars, warnings.
+        Errors: INVALID_ARGUMENT (times outside the cycle, a group missing or listed twice), JOB_RUNNING,
+        RESOLVE_FAILED (no such controller), COM_ERROR, NOT_CONNECTED, TIMEOUT_HUNG.
+
+        Example: vissim_set_signal_program(sc_no=1, cycle_s=60, groups=[{"sg_no": 1, "green_start_s": 0,
+        "green_end_s": 25}, {"sg_no": 2, "green_start_s": 30, "green_end_s": 55}])
+        """
+        args = {
+            "sc_no": sc_no,
+            "cycle_s": cycle_s,
+            "groups": groups,
+            "amber_s": amber_s,
+            "red_amber_s": red_amber_s,
+            "dry_run": dry_run,
+        }
+        progress: dict[str, Any] = {}
+        async with AuditRecord(service, "vissim_set_signal_program", args) as audit:
+            sc = object_number(sc_no, "sc_no")
+            cycle_ms = _milliseconds(cycle_s, "cycle_s", MIN_CYCLE_S, MAX_CYCLE_S)
+            amber_ms = _milliseconds(amber_s, "amber_s", 0, MAX_TRANSITION_S)
+            red_amber_ms = _milliseconds(red_amber_s, "red_amber_s", 0, MAX_TRANSITION_S)
+            times = program_groups(groups, cycle_ms, amber_ms, red_amber_ms)
+            dry = flag(dry_run, "dry_run")
+            audit.update(path=f"Net.SignalControllers[{sc}]", dry_run=dry)
+            service.ensure_connected()
+            job = service.active_job()
+            if job is not None:
+                raise job_running_error(job)
+            task = functools.partial(
+                set_program_task, sc, cycle_ms, times, amber_ms, red_amber_ms, dry, service, progress
+            )
+            try:
+                data = await service.call(task, task_name="vissim_set_signal_program")
+            finally:
+                audit.update(
+                    old=progress.get("old"),
+                    written=list(progress.get("written", [])),
+                    created_groups=list(progress.get("created_groups", [])),
+                )
+        warnings: list[str] = []
+        controller_type = data.get("controller_type")
+        if isinstance(controller_type, str) and controller_type.replace(" ", "").upper() != "FIXEDTIME":
+            warnings.append(
+                f"the controller type is {controller_type}; a fixed-time program is only used by a "
+                "controller of type FIXEDTIME"
+            )
+        if not dry and data.get("stored") is False:
+            warnings.append("the program read back from Vissim differs from the one written")
+        result: dict[str, Any] = {
+            "sc_no": sc,
+            "path": data["path"],
+            "cycle_s": cycle_ms / 1000,
+            "groups": [
+                {
+                    "sg_no": group.no,
+                    "green_start_s": group.green_start_ms / 1000,
+                    "green_end_s": group.green_end_ms / 1000,
+                }
+                for group in times
+            ],
+            "amber_s": amber_ms / 1000,
+            "red_amber_s": red_amber_ms / 1000,
+            "dry_run": dry,
+            "created_groups": data["created_groups"],
+            "program_chars": data["program_chars"],
+        }
+        if not dry:
+            result[PROGRAM_ATTR] = data.get(PROGRAM_ATTR)
+            result["stored"] = data.get("stored")
+        result["warnings"] = [*warnings, *audit.warnings]
+        return result
+
+    register_tool(
+        mcp,
+        vissim_set_signal_program,
+        name="vissim_set_signal_program",
+        title="Set a fixed-time signal program",
+        settings=settings,
+        read_only=False,
+        destructive=True,  # replaces the controller's signal program
         idempotent=True,
     )

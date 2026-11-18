@@ -12,4 +12,12 @@
 - 200 qatordan ko'p natija — `vissim_export_csv`.
 - Signal holatini faqat `pause_at` bilan pauza qilingan simulyatsiyada o'zgartir; oxirida `release_to_controller=true`.
 - `TIMEOUT_HUNG` bo'lsa — Vissim oynasida modal dialog bo'lishi mumkin: foydalanuvchiga ayt, keyin `vissim_restart`.
+- Tarmoq qurish/o'zgartirish: `vissim_describe` bilan metod va parametrlarni ko'r, keyin `vissim_call_method`
+  (`AddLink`, `AddConnector`, `AddVehicleInput`, `Remove...`); obyekt argumenti — `{"ref": "Net.Links[1]"}`.
+  O'chirish va `New` dan oldin tasdiq ol.
+- Yangi svetofor kontrolleriga `vissim_set_signal_program` bilan dastur ber; to'qnashuvchi yo'nalishlarga bir
+  vaqtda yashil berma.
+- Yangi (yoki `New` qilingan) tarmoqni simulyatsiyadan oldin `vissim_save_network` bilan saqla.
+- Simulyatsiya boshlanmasa — xatodagi Vissim xabarlarini (`details`) o'qi, sababni tuzat, saqla va
+  `vissim_load_network` bilan qayta yukla.
 - Ish oxirida `vissim_close` (litsenziya seat'ini bo'shatish).

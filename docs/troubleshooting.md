@@ -111,6 +111,10 @@ qaytadan `vissim_start_simulation`. `RPC_S_CALL_FAILED` (`-2147023170`) — javo
 | `READ_ONLY_PATH` | `models\original` (yoki `VISSIM_READONLY_DIRS`) ichiga yozish/saqlash | Boshqa nomga, masalan `D:\VissimProjects\work\` ga saqlang. Asl modellar ataylab himoyalangan |
 | `ATTRIBUTE_DENIED` | Nomida File/Path/Folder/Dir bo'lgan atributni yozish | Fayl siyosatini chetlab o'tishdan himoya. Haqiqatan kerak bo'lsa (test kompyuterida): `-ExtraEnv 'VISSIM_ALLOW_PATH_ATTRS=1'` |
 | `INVALID_ARGUMENT` (kengaytma) | Yuklash faqat `.inpx`/`.layx`, saqlash `.inpx`, eksport `.csv` | To'g'ri kengaytma bering |
+| `COM_ERROR` "The network file could not be loaded" | Vissim tarmoqni rad etdi; sabab `details.vissim_messages` da | Ko'pincha litsenziya cheklovi: Academic litsenziyada tarmoq ≤ 10 000 m, svetofor kontrollerlari ≤ 20. Yoki fayl yangiroq Vissim versiyasida saqlangan, yoki hamroh fayl yo'q |
+| `COM_ERROR` "The simulation could not be continued" | Run boshlanmadi; sabab `details.vissim_messages` da (masalan, svetofor kontrollerida dastur yo'q) | Sababni tuzating (`vissim_set_signal_program` va h.k.), `vissim_save_network`, so'ng **`vissim_load_network` bilan qayta yuklang** — aks holda Vissim keyingi runni ham boshlamaydi |
+| `INVALID_ARGUMENT` "the network in Vissim has no file yet" | Yangi (`New`) yoki hech saqlanmagan tarmoqda simulyatsiya | Avval `vissim_save_network(save_as=...)` |
+| `ATTRIBUTE_DENIED` (`vissim_call_method`) | Metod tarmoqni tahrirlovchi emas (`LoadNet`, `SaveNetAs`, `RunContinuous` ...) | Fayllar — `vissim_load_network`/`vissim_save_network`, simulyatsiya — simulyatsiya toollari |
 | `FILE_NOT_FOUND` | Yuklanadigan fayl yo'q; yoki saqlash/eksport papkasini yaratib bo'lmadi | Yo'lni tekshiring; nisbiy yo'l birinchi ruxsat etilgan ildizga nisbatan ochiladi. `vissim_save_network` va `vissim_export_csv` ruxsat etilgan ildiz ichida yo'q papkani o'zi yaratadi (javobda `created_folder`); yarata olmasa — shu nomda fayl bor yoki yozish huquqi yo'q |
 
 ## 6. `/mcp` da server yo'q yoki "failed"

@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `vissim-mcp`: a stdio MCP server (Python, `src/vissim_mcp`) that lets Claude Code drive PTV Vissim through COM on
-Windows. 22 tools named `vissim_*`. Version lives in `src/vissim_mcp/__init__.py`.
+Windows. 24 tools named `vissim_*` (the 22 of PLAN 7 plus `vissim_call_method` and
+`vissim_set_signal_program`). Version lives in `src/vissim_mcp/__init__.py`.
 
 Sources of truth, in order: `PLAN.md` (Uzbek; WHAT to build, cited in code as "PLAN 6.2" etc.), then
 `docs/implementation-contract.md` (English; HOW the modules fit, hard rules). If they disagree, follow PLAN.md and
@@ -71,6 +72,11 @@ user asks.
   (`docs/test-report-v1.md`); the manual steps C1–C3 of `docs/m6-runbook.md` are still open, so `v1.0.0` is untagged.
 - A COM-launched Vissim now and then shows the license dialog even with the valid license; `connect`/`restart`
   retry (`VissimService.start_retries`). A real test that fails with "license dialog" is this flake, not a bug.
+- Vissim facts that shaped the code (all in `docs/com-names.md`): a network without a file makes Vissim open a
+  'Save as' dialog when a run starts (so `start_simulation` refuses it); after a run failed to start, later
+  runs fail until the network is reloaded; using a COM reference obtained before `Vissim.New()` crashes
+  Vissim (always resolve from the root, as `resolver.py` does); the Academic license refuses networks over
+  10 000 m or with more than 20 signal controllers.
 - Real Vissim returns booleans as 1/0 and enums as upper-case strings ("KEEPALL"); keep `tests/fake_vissim.py`
   in line with what `docs/com-names.md` and the test report record about the real behaviour.
 - COM error texts are localized (Russian on this PC): classify by HRESULT only, never by message text.
@@ -126,11 +132,18 @@ Tools (`tools/*.py`, one module per group, registered in `server.TOOL_MODULES` o
   policy refusal and failure alike. For that reason their arguments use the lenient types `StringArg` / `FlagArg`
   and are validated inside the body — a FastMCP schema rejection would bypass both the audit record and the error
   format.
+- `tools/network.py` (`vissim_call_method`) is the only way to call COM methods: an allow-list of
+  network-editing prefixes (`Add`, `Remove`, `Duplicate`, ...), `New` on the root, object arguments as
+  `{"ref": path}`. Never widen it to file, import/export or simulation methods - those have their own tools
+  and policies.
+- `messages.py` reads what Vissim itself reported (`<network>_NNN.err`, `%TEMP%\VISSIM\vissim_msgs.txt`) and
+  attaches it to failed loads and failed runs as `details.vissim_messages`; in test mode it never reads the
+  real log.
 - Object paths like `Net.Links[1]` are parsed and resolved by `resolver.py`; file paths go through `policy.py`
   (fail-closed allowed roots, read-only `models\original`, extension allow-list, path-like attribute names denied).
 - Logs never contain argument or attribute values; those go only to the audit log.
 
-The tool count (22) is asserted in several places (`scripts/mcp_smoke.py`, `doctor.ps1`, tests, README), and
+The tool count (24) is asserted in several places (`scripts/mcp_smoke.py`, `doctor.ps1`, tests, README), and
 `examples/*` are checked against the server configuration by unit tests — adding or renaming a tool or a `VISSIM_*`
 setting (`config.py`) means updating those too.
 

@@ -102,7 +102,7 @@ def test_type_info_members(fake_vissim: FakeVissim) -> None:
     assert len(members) == len({(m["name"], m["kind"]) for m in members})
     names = {member["name"] for member in members}
     assert {"QueryInterface", "AddRef", "Release", "Invoke", "GetTypeInfo"}.isdisjoint(names)
-    assert {"name": "LoadNet", "kind": "method"} in members
+    assert {"name": "LoadNet", "kind": "method", "params": ["path", "additive"]} in members
     assert {"name": "Net", "kind": "property_get"} in members
     link = type_info_members(fake_vissim.Net.Links.ItemByKey(1))
     assert {"name": "AttValue", "kind": "property_get"} in link

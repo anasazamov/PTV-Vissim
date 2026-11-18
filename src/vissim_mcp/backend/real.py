@@ -59,7 +59,7 @@ class RealComBackend:
     def is_com_error(self, exc: BaseException) -> bool:
         return is_com_error(exc)
 
-    def type_info_members(self, obj: Any) -> list[dict[str, str]]:
+    def type_info_members(self, obj: Any) -> list[dict[str, Any]]:
         return type_info_members(obj)
 
 

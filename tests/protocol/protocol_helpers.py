@@ -33,14 +33,16 @@ SIMULATION_TOOLS = [
     "vissim_stop_simulation",
 ]
 RESULT_TOOLS = ["vissim_export_csv"]
-SIGNAL_TOOLS = ["vissim_set_signal_state"]
+NETWORK_TOOLS = ["vissim_call_method"]
+SIGNAL_TOOLS = ["vissim_set_signal_state", "vissim_set_signal_program"]
 DIAGNOSTIC_TOOLS = ["vissim_tail_log", "vissim_exec_python"]
-#: Every registered tool in tools/list order: the 22 tools of PLAN 7 (life cycle, files, objects, simulation,
-#: results, signals, diagnostics).
+#: Every registered tool in tools/list order: the 22 tools of PLAN 7 plus vissim_call_method and
+#: vissim_set_signal_program (life cycle, files, objects, network, simulation, results, signals, diagnostics).
 ALL_TOOLS = [
     *LIFECYCLE_TOOLS,
     *FILE_TOOLS,
     *OBJECT_TOOLS,
+    *NETWORK_TOOLS,
     *SIMULATION_TOOLS,
     *RESULT_TOOLS,
     *SIGNAL_TOOLS,

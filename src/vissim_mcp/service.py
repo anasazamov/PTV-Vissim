@@ -395,9 +395,27 @@ class VissimService:
                 raise await self._com_error(worker, exc, task_name) from None
             raise
         if not done:
-            raise self._timeout_error(worker, task_name, timeout)
+            error = self._timeout_error(worker, task_name, timeout)
+            await self._add_window_titles(error)
+            raise error
         self._raise_if_superseded(worker, task_name)
         return result
+
+    async def _add_window_titles(self, error: VissimMcpError) -> None:
+        """Name the windows of our Vissim in a ``TIMEOUT_HUNG`` error when there is more than the main window
+        - the extra one is normally the modal dialog that blocks COM (real Vissim, M6: 'Save as' when a
+        simulation is started on a network without a file). Best effort, never raises."""
+        try:
+            titles = await asyncio.to_thread(self.procs.window_titles, self.pid)
+        except Exception:
+            log.debug("reading the Vissim window titles failed", exc_info=True)
+            return
+        titles = [str(title) for title in titles if title]
+        if len(titles) < 2:
+            return
+        shown = "; ".join(f"'{title}'" for title in titles[:6])
+        error.message = f"{error.message}. Vissim windows now open: {shown}"
+        error.details = {**(error.details or {}), "window_titles": titles[:6]}
 
     def _raise_if_superseded(self, worker: Any, task_name: str) -> None:
         if worker is not self.worker:
@@ -1254,6 +1272,11 @@ class VissimService:
         self.job_object_active = False
         self._forget_files()
         self.connect_warnings = []
+
+    def network_replaced(self) -> None:
+        """The network in Vissim was replaced by an empty one (``Vissim.New()``): no file is loaded any more,
+        so nothing is protected against overwriting and the next save needs a new name."""
+        self._forget_files()
 
     def _forget_files(self) -> None:
         self.loaded_file = None

@@ -5,7 +5,7 @@ Starts the server exactly as Claude Code would - the ``command``/``args``/``env`
 
 1. ``<command> <args> --check`` exits 0 (the configuration is valid);
 2. ``<command> <args> --version`` prints the server version;
-3. MCP over stdio: ``initialize`` -> ``notifications/initialized`` -> ``tools/list`` returns exactly the 22
+3. MCP over stdio: ``initialize`` -> ``notifications/initialized`` -> ``tools/list`` returns exactly the 24
    tools of PLAN 7 -> ``tools/call vissim_health`` returns ``ok: true`` (no COM is touched: start-up and
    ``vissim_health`` never call COM, and ``vissim_connect`` is never called);
 4. every stdout line is a JSON-RPC message;
@@ -42,7 +42,7 @@ DECOY_MESSAGE = (
     "start the server with python -P (register it again with install.ps1)"
 )
 
-#: The 22 tools of the PLAN 7 catalogue.
+#: The 24 tools: the PLAN 7 catalogue plus vissim_call_method and vissim_set_signal_program.
 EXPECTED_TOOLS: tuple[str, ...] = (
     "vissim_connect",
     "vissim_health",
@@ -56,6 +56,7 @@ EXPECTED_TOOLS: tuple[str, ...] = (
     "vissim_get_attributes",
     "vissim_set_attributes",
     "vissim_set_attribute_bulk",
+    "vissim_call_method",
     "vissim_configure_simulation",
     "vissim_start_simulation",
     "vissim_simulation_status",
@@ -64,6 +65,7 @@ EXPECTED_TOOLS: tuple[str, ...] = (
     "vissim_stop_simulation",
     "vissim_export_csv",
     "vissim_set_signal_state",
+    "vissim_set_signal_program",
     "vissim_tail_log",
     "vissim_exec_python",
 )

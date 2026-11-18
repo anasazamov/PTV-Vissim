@@ -1,7 +1,8 @@
 """Protocol tests for the signal and diagnostic tools (PLAN 10.2, 11 row M5) and the complete tool catalogue.
 
 The server runs as ``python -X utf8 -m vissim_mcp`` with the fake pywin32 modules. Checks: tools/list holds
-exactly the 22 tools of PLAN 7 (each with a description below 4096 characters and annotations);
+exactly the 24 tools (PLAN 7 + two extensions; each with a description below 4096 characters and
+annotations);
 set_signal_state and tail_log over stdio; exec_python is disabled by default and, when enabled, nothing the
 executed code writes to stdout (``print``, ``sys.stdout``, ``os.write(1)``) reaches the protocol stream.
 """
@@ -38,6 +39,7 @@ PLAN_7_TOOLS = sorted(
         "vissim_get_attributes",
         "vissim_set_attributes",
         "vissim_set_attribute_bulk",
+        "vissim_call_method",
         # 7.4 simulation
         "vissim_configure_simulation",
         "vissim_start_simulation",
@@ -48,6 +50,7 @@ PLAN_7_TOOLS = sorted(
         # 7.5 results and signals
         "vissim_export_csv",
         "vissim_set_signal_state",
+        "vissim_set_signal_program",
         # 7.6 diagnostics
         "vissim_tail_log",
         "vissim_exec_python",
@@ -67,7 +70,7 @@ def test_tools_list_is_exactly_the_plan_7_catalogue(start_server: StartServer) -
     server = start_server(env=SAFE_ENV)
     tools = handshake(server)
     assert sorted(tools) == PLAN_7_TOOLS
-    assert len(tools) == 22 and list(tools) == ALL_TOOLS
+    assert len(tools) == 24 and list(tools) == ALL_TOOLS
     for name, tool in tools.items():
         description = tool.get("description") or ""
         assert description and len(description) < 4096, name

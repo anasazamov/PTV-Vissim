@@ -42,9 +42,9 @@ def _run(script: Path, args: list[str], env: dict[str, str]) -> subprocess.Compl
     )
 
 
-def test_expected_tools_are_the_22_of_plan_7() -> None:
-    assert len(smoke_mod.EXPECTED_TOOLS) == 22
-    assert len(set(smoke_mod.EXPECTED_TOOLS)) == 22
+def test_expected_tools_are_the_24_of_the_catalogue() -> None:
+    assert len(smoke_mod.EXPECTED_TOOLS) == 24
+    assert len(set(smoke_mod.EXPECTED_TOOLS)) == 24
 
 
 def test_smoke_passes_against_server(server_env: dict[str, str]) -> None:
@@ -52,7 +52,7 @@ def test_smoke_passes_against_server(server_env: dict[str, str]) -> None:
     assert completed.returncode == 0, completed.stderr
     summary = json.loads(completed.stdout.strip().splitlines()[-1])
     assert summary["ok"] is True
-    assert summary["tools"] == 22
+    assert summary["tools"] == 24
     assert summary["health"]["ok"] is True and summary["health"]["connected"] is False
     assert summary["check"] == "ok"
     assert summary["exit_code"] == 0
@@ -112,7 +112,7 @@ def test_smoke_detects_a_wrong_tool_list(server_env: dict[str, str], monkeypatch
     for key, value in server_env.items():
         monkeypatch.setenv(key, value)
     server = smoke_mod.load_server(None, sys.executable, [])
-    with pytest.raises(smoke_mod.SmokeFailure, match="expected 23"):
+    with pytest.raises(smoke_mod.SmokeFailure, match="expected 25"):
         smoke_mod.smoke(server, timeout=60, expected=(*smoke_mod.EXPECTED_TOOLS, "vissim_extra"))
 
 

@@ -117,7 +117,7 @@ class FakeBackend:
     def is_com_error(self, exc: BaseException) -> bool:
         return is_com_error(exc)
 
-    def type_info_members(self, obj: Any) -> list[dict[str, str]]:
+    def type_info_members(self, obj: Any) -> list[dict[str, Any]]:
         """Members from COM type info - the production rules (``backend.base.type_info_members``): plumbing
         and restricted members removed, de-duplicated, sorted; ``INFO_UNAVAILABLE`` without type info, while a
         lost connection raises its COM error (like the real backend)."""

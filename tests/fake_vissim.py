@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import functools
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -252,9 +253,14 @@ class FakeTypeInfo:
         self._entries: list[tuple[str, int, int, int]] = [
             (name, memid, INVOKE_FUNC, FUNCFLAG_FRESTRICTED) for name, memid in PLUMBING_MEMBERS
         ]
+        self._params: dict[str, tuple[str, ...]] = {}
         for memid, (name, kinds) in enumerate(com_members(cls), start=1):
             for kind in kinds:
                 self._entries.append((name, memid, _KIND_TO_INVOKE[kind], 0))
+            member = getattr(cls, name, None)
+            if "method" in kinds and callable(member):
+                wrapped = getattr(member, "__wrapped__", member)
+                self._params[name] = tuple(inspect.signature(wrapped).parameters)[1:]  # without self
 
     def GetTypeAttr(self) -> FakeTypeAttr:
         return FakeTypeAttr(cFuncs=len(self._entries))
@@ -264,9 +270,10 @@ class FakeTypeInfo:
         return FakeFuncDesc(memid=memid, invkind=invkind, wFuncFlags=flags)
 
     def GetNames(self, memid: int) -> tuple[str, ...]:
+        """The member name followed by its parameter names (like ITypeInfo::GetNames)."""
         for name, entry_memid, _invkind, _flags in self._entries:
             if entry_memid == memid:
-                return (name,)
+                return (name, *self._params.get(name, ()))
         raise make_com_error(TYPE_E_ELEMENTNOTFOUND)
 
     def GetDocumentation(self, memid: int) -> tuple[str, str | None, int, str | None]:
@@ -600,6 +607,7 @@ TEMPLATES: dict[str, CollectionTemplate] = {
             _spec("Type", "FixedTime", "str", False),
             _spec("ProgNo", 1, "int", minimum=1),
             _spec("SupplyFile1", "", "filename"),
+            _spec("IntSupplyData", "", "str"),
         ),
         item_class=FakeSignalController,
         children=("SGs",),
@@ -848,7 +856,71 @@ class FakeCollection(FakeComObject):
         self._items[key] = obj
         return obj
 
+    def _next_key(self, key: Any) -> Any:
+        """Key 0 = the next free number (like Vissim); an existing key is refused."""
+        if isinstance(key, bool) or not isinstance(key, (int, str)):
+            raise make_com_error(DISP_E_TYPEMISMATCH)
+        if key == 0:
+            numbers = [k for k in self._all() if isinstance(k, int) and not isinstance(k, bool)]
+            return max(numbers, default=0) + 1
+        if self._find(key) is not None:
+            raise vissim_error(f"{self._template.item_label} with key {key!r} already exists.", E_INVALIDARG)
+        return key
+
+    def _member_of(self, obj: Any, what: str) -> FakeNetObject:
+        if not isinstance(obj, FakeNetObject):
+            raise make_com_error(DISP_E_TYPEMISMATCH)
+        if not any(item is obj for item in self._all().values()):
+            raise vissim_error(f"{what} failed: the object does not belong to this collection.", E_INVALIDARG)
+        return obj
+
+    def _require_no_run(self, what: str) -> None:
+        if self._root._sim_active:
+            raise vissim_error(f"{what} failed: not possible while a simulation run is in progress.")
+
     # -- COM members ----------------------------------------------------------------------------------------
+
+    # Network editing. Real Vissim names these per collection (AddLink, AddVehicleInput, RemoveLink ...) and
+    # every collection has its own parameters; the fake offers the same four on every collection.
+
+    @com_method
+    def AddLink(self, Key: Any, WktLinestring: str, LaneWidths: Sequence[float]) -> FakeNetObject:
+        if not isinstance(WktLinestring, str) or not WktLinestring.upper().startswith("LINESTRING"):
+            raise vissim_error("AddLink failed: invalid WKT line string.", E_INVALIDARG)
+        if isinstance(LaneWidths, (str, bytes)) or not isinstance(LaneWidths, Sequence) or not LaneWidths:
+            raise make_com_error(DISP_E_TYPEMISMATCH)
+        self._require_no_run("AddLink")
+        obj = self._add(self._next_key(Key))
+        if "numlanes" in obj._attrs:
+            obj._attrs["numlanes"].value = len(LaneWidths)
+        return obj
+
+    @com_method
+    def AddSignalGroup(self, Key: Any) -> FakeNetObject:
+        self._require_no_run("AddSignalGroup")
+        return self._add(self._next_key(Key))
+
+    @com_method
+    def AddVehicleInput(self, Key: Any, Link: Any) -> FakeNetObject:
+        if not isinstance(Link, FakeNetObject):
+            raise make_com_error(DISP_E_TYPEMISMATCH)
+        self._require_no_run("AddVehicleInput")
+        return self._add(self._next_key(Key), {"Link": str(Link._key)})
+
+    @com_method
+    def DuplicateLink(self, Source: Any, NewKey: Any) -> FakeNetObject:
+        source = self._member_of(Source, "DuplicateLink")
+        self._require_no_run("DuplicateLink")
+        values = {spec.name: spec.value for spec in source._attrs.values() if spec.name.lower() != "no"}
+        return self._add(self._next_key(NewKey), values)
+
+    @com_method
+    def RemoveLink(self, Link: Any) -> None:
+        obj = self._member_of(Link, "RemoveLink")
+        self._require_no_run("RemoveLink")
+        for key, item in list(self._all().items()):
+            if item is obj:
+                del self._items[key]
 
     @com_property
     def Count(self) -> int:
@@ -1186,6 +1258,10 @@ class FakeVissim(FakeComObject):
 
         # files and GUI
         self.loaded_net_path: str | None = None
+        #: True after New(): the network has no file until it is saved or another one is loaded.
+        self.unsaved_new = False
+        #: Folder the fake reports for its built-in demo network (tests may point it at a real folder).
+        self.demo_folder = os.path.join(os.sep, "fake-vissim")
         self.layout_path: str | None = None
         self.saved_paths: list[str] = []
         self.load_count = 0
@@ -1422,6 +1498,7 @@ class FakeVissim(FakeComObject):
         if data is not None:
             self._restore_network(data)
         self.loaded_net_path = str(file)
+        self.unsaved_new = False
         self.layout_path = None
         self.load_count += 1
         self.last_load_additive = bool(additive)
@@ -1447,6 +1524,7 @@ class FakeVissim(FakeComObject):
             raise vissim_error(f"SaveNetAs failed: {exc}") from None
         self.saved_paths.append(str(file))
         self.loaded_net_path = str(file)
+        self.unsaved_new = False
 
     @com_method
     def SaveNet(self) -> None:
@@ -1463,6 +1541,24 @@ class FakeVissim(FakeComObject):
         self._reset_model(populate=False)
         self.loaded_net_path = None
         self.layout_path = None
+        self.unsaved_new = True
+
+    @com_method
+    def AttValue(self, attribute: str) -> Any:
+        """Root attributes: the network file (real Vissim 2026: InputFile "net1.inpx", WorkingFolder with a
+        trailing separator, both "" for a network without a file). The demo network of the fake counts as a
+        file-backed network until ``New()`` is called."""
+        name = _attr_arg(attribute).lower()
+        path = self.loaded_net_path
+        if path is None and not self.unsaved_new:
+            path = os.path.join(self.demo_folder, "demo.inpx")
+        if name == "inputfile":
+            return os.path.basename(path) if path else ""
+        if name == "workingfolder":
+            return os.path.dirname(path) + os.sep if path else ""
+        raise vissim_error(f"AttValue failed: VISSIM: unknown attribute '{attribute}'.", E_INVALIDARG)
+
+    AttValue._com_kinds = ("property_get", "property_put")  # type: ignore[attr-defined]
 
     @com_method
     def Exit(self) -> None:

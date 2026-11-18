@@ -7,7 +7,10 @@ is deterministic: one ``tick`` = one chunk.
 from __future__ import annotations
 
 import dataclasses
+import os
 import threading
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -636,3 +639,52 @@ def test_multi_run_warning_depends_on_keep_prev_results(settings: Settings) -> N
     vissim._evaluation._attrs["keepprevresults"].value = 1
     _job, data = start(vissim, settings, runs=1, seed=1)  # a single run: nothing to lose
     assert data["warnings"] == []
+
+
+def test_a_network_without_a_file_is_refused(settings: Settings) -> None:
+    """Real Vissim opens a 'Save as' dialog when a simulation starts on a network without a file - and COM
+    hangs (M6). InputFile is "" for such a network."""
+    vissim = make_vissim(300)
+    vissim.New()
+    vissim.set_simulation_attribute("SimPeriod", 300)
+    with pytest.raises(VissimMcpError) as raised:
+        start(vissim, settings, runs=1)
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT and "has no file" in raised.value.message
+    assert "vissim_save_network" in (raised.value.hint or "")
+    assert vissim.sim_active is False
+
+
+def test_vissim_messages_of_a_failed_run_are_reported(settings: Settings, tmp_path: Path) -> None:
+    """Vissim writes why a run could not start to <network>_NNN.err; the job error carries those lines."""
+    vissim = make_vissim(300)
+    vissim.demo_folder = str(tmp_path)
+    (tmp_path / "demo_000.err").write_text("old\tmessage\n", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(tmp_path / "demo_000.err", (old, old))
+    job, _data = start(vissim, settings, runs=1)
+    (tmp_path / "demo_001.err").write_text(
+        "\ufeff   Error\tThe signal groups differ from those in the external data files.\tObject: 1\n"
+        "   Critical error\tSimulation run 1 cannot be started.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "other_001.err").write_text("not ours\n", encoding="utf-8")
+    vissim.raise_com_error_next(DISP_E_EXCEPTION, "The simulation could not be continued.")
+    job.tick(vissim, settings)
+    error = job.snapshot()["error"]
+    assert job.state is JobState.ERROR and error["code"] == "COM_ERROR"
+    assert error["details"]["vissim_messages"] == [
+        "Error | The signal groups differ from those in the external data files. | Object: 1",
+        "Critical error | Simulation run 1 cannot be started.",
+    ]
+    assert error["message"].endswith("Vissim reported: " + error["details"]["vissim_messages"][0])
+    assert "vissim_load_network" in error["hint"] and "vissim_save_network" in error["hint"]
+
+
+def test_no_error_file_means_no_messages(settings: Settings, tmp_path: Path) -> None:
+    vissim = make_vissim(300)
+    vissim.demo_folder = str(tmp_path / "missing")
+    job, _data = start(vissim, settings, runs=1)
+    vissim.raise_com_error_next(DISP_E_EXCEPTION, "The simulation could not be continued.")
+    job.tick(vissim, settings)
+    error = job.snapshot()["error"]
+    assert "vissim_messages" not in (error.get("details") or {}) and "Vissim reported" not in error["message"]

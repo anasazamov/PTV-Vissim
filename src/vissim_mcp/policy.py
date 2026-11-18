@@ -153,6 +153,10 @@ class PathPolicy:
             )
         return resolved, warnings
 
+    def check_location(self, path: Any) -> Path:
+        """A location inside an allowed root (any file type, existing or not); ``PATH_DENIED`` otherwise."""
+        return self._check(path, None)[0]
+
     def is_readonly(self, path: Path) -> bool:
         """True when ``path`` (already resolved) lies inside a read-only root - by path, or because one of its
         existing parent directories *is* a read-only root (same volume and file id), whatever its spelling."""
@@ -332,6 +336,42 @@ def check_attribute_writable(name: str, allow_path_attrs: bool) -> None:
             "attributes could bypass the file policy)",
             details={"attribute": name, "matched": word},
         )
+
+
+def check_attribute_value(name: str, value: Any, allow_path_attrs: bool, policy: PathPolicy) -> None:
+    """The attribute policy for one ``(name, value)`` pair of ``vissim_set_attributes``.
+
+    A file/path attribute (:func:`path_attribute_word`) may be written when its value cannot leave the file
+    policy: a number, a boolean or an empty value (``Link.Direction``-like false matches, clearing a file
+    name), or a path that resolves inside the allowed directories - e.g. the ``.sig`` file of a fixed-time
+    signal controller (``SupplyFile2``), which a network built through this server needs. Any other value is
+    ``ATTRIBUTE_DENIED`` unless ``VISSIM_ALLOW_PATH_ATTRS=1``.
+    """
+    if allow_path_attrs:
+        return
+    word = path_attribute_word(name)
+    if word is None or value is None or isinstance(value, (bool, int, float)):
+        return
+    if isinstance(value, str):
+        if not value.strip():
+            return
+        try:
+            policy.check_location(value)
+            return
+        except VissimMcpError as err:
+            reason = err.message
+    else:
+        reason = f"a {type(value).__name__} value is not a path"
+    raise VissimMcpError(
+        ErrorCode.ATTRIBUTE_DENIED,
+        f"writing attribute {name!r} is not allowed: its name contains '{word}' and the value is not a path "
+        f"inside the allowed directories ({reason})",
+        hint=(
+            "File and path attributes may only point into VISSIM_ALLOWED_DIRS (vissim_health shows them); "
+            "put the file there, or set VISSIM_ALLOW_PATH_ATTRS=1 on a trusted machine."
+        ),
+        details={"attribute": name, "matched": word},
+    )
 
 
 # --- helpers

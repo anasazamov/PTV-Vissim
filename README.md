@@ -19,7 +19,8 @@ Loyihaning yagona manbai — [`PLAN.md`](PLAN.md); bosqichlararo kelishuvlar —
 | **M6 — Haqiqiy Vissim'da tekshirish** | **avtomatik qismi bajarildi** (2026-11-18, PTV Vissim Academic 2026 SP 10): COM nomlari tasdiqlandi, `tests/real` o'tdi, topilgan farqlar tuzatildi ([`docs/test-report-v1.md`](docs/test-report-v1.md)). Qo'lda bajariladigan C1–C3 qadamlar qolgan ([`docs/m6-runbook.md`](docs/m6-runbook.md), 4-bo'lim) |
 | M7 — Integratsiya va reliz | bajarildi: o'rnatuvchi, doctor, ro'yxatdan o'tkazish yordamchisi, misollar, hujjatlar. `v1.0.0` tegi M6 ning qo'lda qadamlaridan keyin qo'yiladi |
 
-Server versiyasi hozir `1.0.0rc2` (`src/vissim_mcp/__init__.py`).
+Server versiyasi hozir `1.1.0rc1` (`src/vissim_mcp/__init__.py`). PLAN 7 dagi 22 ta toolga ikkita qo'shimcha
+qo'shilgan: `vissim_call_method` (tarmoq qurish) va `vissim_set_signal_program` (svetofor dasturi).
 
 ## Talablar
 
@@ -62,7 +63,7 @@ ko'rsatganda qayta ishga tushiring. U nima qiladi:
 4. Runtime'ni tekshiradi: 64-bit, bog'liqliklar import qilinadi, o'rnatilgan kod repozitoriya bilan aynan bir xil.
 5. `<ProjectsDir>\models\original` papkasini yaratadi (asl modellar uchun, server u yerga yozmaydi).
 6. Ro'yxatdan o'tkaziladigan **aynan o'sha muhit** bilan `python -X utf8 -P -m vissim_mcp --check` ni bajaradi.
-7. MCP stdio smoke test (`scripts\mcp_smoke.py`): `initialize` → `tools/list` (22 ta tool) → `vissim_health`.
+7. MCP stdio smoke test (`scripts\mcp_smoke.py`): `initialize` → `tools/list` (24 ta tool) → `vissim_health`.
    Vissim ishga tushirilmaydi.
 8. Claude Code'ga ro'yxatdan o'tkazadi (`scripts\register_claude.py` → `claude mcp add-json vissim <json> -s user`)
    va `claude mcp get vissim` bilan tekshiradi.
@@ -85,7 +86,7 @@ Parametrlar:
 | `-Claude` | — | `claude.exe` yo'li (standart: PATH, keyin `%USERPROFILE%\.local\bin\claude.exe`) |
 
 O'rnatishdan keyin **yangi** Claude Code sessiyasini oching (yoki ochiq sessiyada `/mcp` → `vissim` → Reconnect) va
-`/mcp` da `vissim` ulangan (✔) ekanini, toollar soni 22 ekanini tekshiring.
+`/mcp` da `vissim` ulangan (✔) ekanini, toollar soni 24 ekanini tekshiring.
 
 > Muhim: Claude Code ishlab turgan server jarayonini yangilamaydi — stdio serverlar avtomatik qayta ulanmaydi.
 > Qayta o'rnatishdan keyin har bir ochiq sessiyada `/mcp` → Reconnect qiling. Venv qayta yaratilishi kerak bo'lsa
@@ -183,7 +184,24 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
    (takror, har biri ≤ 90 s) → `vissim_export_csv`.
 7. `vissim_close` — litsenziya seat'ini bo'shatish.
 
-22 ta tool:
+Noldan tarmoq qurish (loyihani to'liq MCP orqali bajarish):
+
+1. `vissim_call_method(path="Vissim", method="New")` — bo'sh tarmoq.
+2. `vissim_describe(path="Net.Links")` — metodlar va parametr nomlari (`AddLink(Key, WktLinestring, LaneWidths)`).
+3. `vissim_call_method` bilan havolalar (`AddLink`), ulagichlar (`AddConnector`), transport oqimi
+   (`AddVehicleInput`), marshrut qarorlari va marshrutlar (`AddVehicleRoutingDecisionStatic`,
+   `AddVehicleRouteStatic`), o'lchov nuqtalari (`AddDataCollectionPoint`, `AddVehicleTravelTimeMeasurement` ...).
+   Obyekt argumenti `{"ref": "Net.Links[1].Lanes[1]"}` ko'rinishida beriladi; javobda yangi obyektning `key` va
+   `path` i qaytadi. Atributlar keyin `vissim_set_attributes` bilan qo'yiladi (`Volume(1)`, `RelFlow(1)` ...).
+4. Svetofor: `AddSignalController`, `AddSignalHead` (+ `SG` atributi `"<kontroller>-<guruh>"`), so'ng
+   `vissim_set_signal_program(sc_no, cycle_s, groups=[{sg_no, green_start_s, green_end_s}])` — dastur tarmoq
+   ichida saqlanadi, `.sig` fayl kerak emas.
+5. `vissim_save_network` — **simulyatsiyadan oldin majburiy**: fayli yo'q tarmoqda Vissim "Saqlash" dialogini
+   ochadi; server bunday holatda `vissim_start_simulation` ni rad etadi.
+6. Simulyatsiya va natijalar — yuqoridagidek. Run boshlanmasa, xatoda Vissim'ning o'z xabari
+   (`details.vissim_messages`) keladi; sababni tuzatib, saqlab, `vissim_load_network` bilan qayta yuklang.
+
+24 ta tool:
 
 | Guruh | Tool | Vazifasi | Turi |
 |---|---|---|---|
@@ -199,6 +217,7 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
 | | `vissim_get_attributes` | Bitta obyekt atributlari | o'qish |
 | | `vissim_set_attributes` | Atributlarni yozish (`dry_run`), audit | yozuvchi |
 | | `vissim_set_attribute_bulk` | Ko'p obyektga bitta atribut (≤ 5000), audit | yozuvchi |
+| Tarmoq qurish | `vissim_call_method` | Tarmoqni tahrirlovchi COM metodlari: `Add…`, `Remove…`, `Duplicate…`, `Generate…`, `Recalculate…`, `Invert…`, `Move…`; ildizda faqat `New` (bo'sh tarmoq). `dry_run`, audit | buzuvchi |
 | Simulyatsiya | `vissim_configure_simulation` | Davr, aniqlik, urug', tezlik, QuickMode | yozuvchi |
 | | `vissim_start_simulation` | Fon job: runlar, urug'lar, `pause_at` — darhol qaytadi | yozuvchi |
 | | `vissim_simulation_status` | Job holati, foiz, ETA — COM'siz | o'qish |
@@ -207,6 +226,7 @@ Odatdagi sessiya (Vissim loyiha papkasida, masalan `D:\VissimProjects`):
 | | `vissim_stop_simulation` | Keyingi bo'lak chegarasida to'xtatish | yozuvchi |
 | Natijalar | `vissim_export_csv` | Kolleksiya atributlarini CSV'ga (`;`, utf-8-sig), audit | yozuvchi |
 | Signallar | `vissim_set_signal_state` | Signal guruhi holati (`pause_at` bilan pauza qilingan simulyatsiyada; simulyatsiyadan tashqarida Vissim o'zi rad etadi), kontrollerga qaytarish | yozuvchi |
+| | `vissim_set_signal_program` | Qat'iy vaqtli (fixed-time) kontrollerga dastur: sikl va har bir guruhning yashil vaqti; yo'q guruhlarni yaratadi; audit | yozuvchi |
 | Diagnostika | `vissim_tail_log` | Server log oxiri (≤ 500 qator) | o'qish |
 | | `vissim_exec_python` | Ixtiyoriy Python kodi — standart holatda **o'chiq** (`EXEC_DISABLED`) | buzuvchi |
 
@@ -230,8 +250,13 @@ Tavsiya etilgan sozlamalar (PLAN 9.2–9.3):
 - **Fayl tizimi — fail-closed.** Fayl operatsiyalari faqat `VISSIM_ALLOWED_DIRS` ichida (yo'l avval to'liq
   ochiladi: `..`, 8.3 qisqa nomlar, junction/symlink; `D:\A` va `D:\A2` farqlanadi). `models\original` — faqat
   o'qish. Kengaytmalar oq ro'yxati: yuklash `.inpx`/`.layx`, saqlash `.inpx`, eksport `.csv`. NTFS ADS rad etiladi.
-- **Atributlar.** Nomida File/Path/Folder/Dir bo'lgan atributlarni yozish standart holatda taqiqlangan
-  (`ATTRIBUTE_DENIED`) — fayl siyosatini chetlab o'tishning oldini olish uchun.
+- **Atributlar.** Nomida File/Path/Folder/Dir bo'lgan atributga `vissim_set_attributes` faqat ruxsat etilgan
+  papkalar ichidagi yo'lni (masalan kontrollerning `.sig` fayli), sonni, mantiqiy yoki bo'sh qiymatni yozadi;
+  boshqa qiymat — `ATTRIBUTE_DENIED` (`VISSIM_ALLOW_PATH_ATTRS=1` bo'lmasa). Bulk yozish va simulyatsiya `extra`
+  parametrida bunday atributlar butunlay taqiqlangan.
+- **Metodlar.** `vissim_call_method` faqat tarmoqni tahrirlovchi metodlarni chaqiradi; `LoadNet`, `SaveNetAs`,
+  `Import…`, `Export…`, `Exit`, `RunContinuous` kabi metodlar rad etiladi (fayllar va simulyatsiya o'z toollari va
+  siyosati orqali). Simulyatsiya job'i ishlab turganda yoki pauzada bo'lsa tahrirlash rad etiladi.
 - **Kod bajarish.** `vissim_exec_python` faqat `VISSIM_MCP_ALLOW_EXEC=1` bilan; yoqilganda ham kod to'liq audit
   qilinadi. `settings.json.example` uni Claude Code darajasida ham taqiqlaydi.
 - **Jarayonlar.** Server faqat o'zi COM orqali ochgan (`-Embedding`) va PID + ishga tushgan vaqt bilan tasdiqlangan
@@ -279,7 +304,7 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -RemoveRuntime -R
 
 `doctor.ps1` tekshiradi: runtime `python.exe` ishlaydi va 64-bit; o'rnatilgan versiya/kod repozitoriya bilan bir
 xil; `claude mcp get vissim` runtime yo'liga ishora qiladi va ulanadi; ro'yxatdagi muhit bilan `--check`; MCP smoke
-(22 tool, `vissim_health`); ProgID/CLSID va `LocalServer32` fayli; CodeMeter xizmati; Vissim litsenziyalari
+(24 tool, `vissim_health`); ProgID/CLSID va `LocalServer32` fayli; CodeMeter xizmati; Vissim litsenziyalari
 (`cmu --list-network`); qolib ketgan COM Vissim jarayonlari; log papkasi yozilishi; log oxiri. Har bir
 muvaffaqiyatsiz qator uchun tuzatish yo'li chiqadi; FAIL bo'lsa chiqish kodi `1`. Doctor hech narsani o'zgartirmaydi
 (log papkasidagi bir lahzalik sinov faylidan tashqari), Vissim'ni ishga tushirmaydi va to'xtatmaydi. Ro'yxat
@@ -334,7 +359,7 @@ Test qatlamlari (haqiqiy Vissim'siz; CI — Windows va Linux):
 |---|---|
 | `install.ps1`, `uninstall.ps1`, `doctor.ps1`, `_common.ps1` | O'rnatish, o'chirish, tekshirish (Windows PowerShell 5.1) |
 | `register_claude.py` | `claude mcp add-json/remove/get` (argumentlar ro'yxati bilan, shell'siz); `--print-json`, `--show`, `--unregister`, `--dry-run` |
-| `mcp_smoke.py` | `--check`, `--version`, MCP stdio smoke (22 tool, `vissim_health`) |
+| `mcp_smoke.py` | `--check`, `--version`, MCP stdio smoke (24 tool, `vissim_health`) |
 | `runtime_info.py` | Runtime haqida JSON: versiya, bitlik, bog'liqliklar, o'rnatilgan kod xeshi |
 | `preflight.ps1`, `com_smoke.py` | M0 pre-flight (`-ComSmoke` haqiqiy Vissim'ni ochadi — faqat COM litsenziyasi bilan) |
 | `probe_com_names.py` | M6: COM nomlarini haqiqiy Vissim'da tekshirish |
@@ -358,6 +383,17 @@ qaytaradi; `ToolAnnotations` (`readOnlyHint`, `destructiveHint`) qo'yilgan.
   o'sha paytda boshqa Vissim oynalari ham ochiq edi). `vissim_connect`/`vissim_restart` bunday holatda o'zi yana
   2 martagacha urinadi (natijada `attempts` va ogohlantirish); uchala urinish ham muvaffaqiyatsiz bo'lsa —
   `COM_ERROR` ("3 start attempts").
+- **Litsenziya cheklovlari (Academic).** Bu kompyuterdagi litsenziya tarmoq hajmini 10 000 m, svetofor
+  kontrollerlari sonini 20 ta bilan cheklaydi: Vissim bilan kelgan `Mainz` va `Boise` namunalari shu sababli
+  yuklanmaydi (2579 havolali `Karlsruhe 3D` yuklanadi va to'liq ishlaydi). Bunday rad etishda server Vissim'ning
+  o'z xabarini qaytaradi (`details.vissim_messages`). Kattaroq loyiha uchun to'liq litsenziya kerak.
+- **Tarmoq qurish doirasi.** `vissim_call_method` Vissim COM interfeysidagi barcha `Add…/Remove…` metodlarini
+  ochadi, lekin haqiqiy Vissim'da faqat havola, ulagich, transport oqimi, statik marshrut, svetofor kontrolleri/
+  guruhi/boshi, ma'lumot yig'ish nuqtasi/o'lchovi, sayohat vaqti o'lchovi va tugun sinalgan. Svetofor dasturi —
+  faqat qat'iy vaqtli (fixed-time); to'qnashuvchi yashillar tekshirilmaydi. Orqa fon rasmi, 3D modellar, jamoat
+  transporti, piyodalar, dinamik taqsimlash sinalmagan.
+- **Run boshlanmay qolgandan keyin** Vissim shu sessiyada keyingi runlarni ham boshlamaydi: tuzatilgan tarmoqni
+  saqlab `vissim_load_network` bilan qayta yuklash kerak (xato maslahatida aytiladi).
 - **Q7 (ma'lumot siyosati) ochiq.** Yuridik bo'lim tasdig'igacha faqat test modellari.
 - COM nomlari faqat Vissim 2026 da tasdiqlangan; boshqa versiyada farq qilsa `VISSIM_SEED_ATTR`,
   `VISSIM_BREAK_DISABLE_VALUE` bilan sozlanadi, qolganlari `scripts\probe_com_names.py` bilan tekshiriladi.

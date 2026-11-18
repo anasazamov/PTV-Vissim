@@ -94,6 +94,54 @@ skriptdagi `PROBES` ro'yxatini ham o'zgartiring (`tests/unit/test_probe_com_name
 | `VISSIM_SEED_ATTR` | `RandSeed` | AX, EX | configurable (verified) |
 | `VISSIM_BREAK_DISABLE_VALUE` | `0` | EX: "`SimBreakAt` = 0 means no break!", VBS: "If set to 0 then the simulation is not paused"; AX: min 0, standart 0 | configurable (verified) |
 
+## Tarmoq qurish metodlari (haqiqiy Vissim 2026 da tekshirildi, 2026-11-18)
+
+`vissim_call_method` chaqiradigan metodlar. "Sinalgan" — `tests/real/test_real_build_network.py` da haqiqiy Vissim'da
+ishlatilgan; qolganlari type library'dan o'qilgan (`vissim_describe` ko'rsatadi), lekin ishga tushirib ko'rilmagan.
+`Key = 0` — Vissim keyingi bo'sh raqamni o'zi tanlaydi; pozitsiyalar metrda; obyekt argumenti — `{"ref": "<yo'l>"}`.
+
+| Metod | Qayerda | Tekshiruv |
+|---|---|---|
+| `Vissim.New()` | ildiz | sinalgan. **`New()` dan oldin olingan COM havolasi (`Net`) keyin ishlatilsa Vissim qulaydi** — server har chaqiruvda yo'lni ildizdan qayta ochadi |
+| `AddLink(Key, WktLinestring, LaneWidths)` | `Net.Links` | sinalgan: `[0, "LINESTRING(0 0, 200 0)", [3.5, 3.5]]` → 2 polosali havola |
+| `AddConnector(Key, FromLane, FromPos, ToLane, ToPos, NumberOfLanes, WktLinestring)` | `Net.Links` | sinalgan (`WktLinestring = "LINESTRING EMPTY"`); raqami 10000 dan boshlanadi |
+| `RemoveLink(Link)`, `DuplicateLink(Source, NewKey)` | `Net.Links` | sinalgan |
+| `AddVehicleInput(Key, Link)` | `Net.VehicleInputs` | sinalgan; hajm — `Volume(1)` atributi |
+| `AddVehicleRoutingDecisionStatic(Key, Link, Pos)` | `Net.VehicleRoutingDecisionsStatic` | sinalgan |
+| `AddVehicleRouteStatic(Key, DestLink, DestPos)` | `...[n].VehRoutSta` | sinalgan; ulush — `RelFlow(1)` |
+| `AddSignalController(Key)`, `RemoveSignalController(SignalController)` | `Net.SignalControllers` | sinalgan; yangi kontroller turi `FIXEDTIME` |
+| `AddSignalGroup(Key)` | `Net.SignalControllers[n].SGs` | sinalgan |
+| `AddSignalHead(Key, Lane, Pos)`, `RemoveSignalHead(SignalHead)` | `Net.SignalHeads` | sinalgan; guruh — `SG` atributi `"<kontroller>-<guruh>"` |
+| `AddDataCollectionPoint(Key, Lane, Pos)` | `Net.DataCollectionPoints` | sinalgan |
+| `AddDataCollectionMeasurement(Key)` | `Net.DataCollectionMeasurements` | sinalgan; nuqtalar — `DataCollectionPoints` atributi (`"1"`) |
+| `AddVehicleTravelTimeMeasurement(Key, StartLink, StartPos, EndLink, EndPos)` | `Net.VehicleTravelTimeMeasurements` | sinalgan |
+| `AddNode(Key, WktPolygon)` | `Net.Nodes` | sinalgan (prototipda) |
+| `AddDesSpeedDecision`, `AddReducedSpeedArea`, `AddStopSign`, `AddPriorityRule`, `AddQueueCounter`, `AddDetector`, `AddParkingLot`, `AddPTLine`, `AddPTStop`, `AddArea`, `AddPedestrianInput`, `AddSection`, `AddLevel`, `AddVehicleType`, `AddVehicleComposition`, `GenerateOppositeDirection` va ularning `Remove…`/`Duplicate…` juftlari | tegishli kolleksiyalar | type library'da bor, **sinalmagan** |
+
+Baholash yozuvini yoqish (`vissim_set_attributes(path="Evaluation", ...)`): `DataCollCollectData`, `VehTravTmsCollectData`
+— sinalgan.
+
+## Svetofor dasturi (haqiqiy Vissim 2026 da tekshirildi)
+
+| Nima | Kuzatilgan | Kodda |
+|---|---|---|
+| `SignalController.IntSupplyData` | Qat'iy vaqtli kontroller dasturi — base64 bilan kodlangan Vissig XML, tarmoq fayli ichida saqlanadi; COM orqali yoziladi, `.sig` fayl shart emas | `vissim_set_signal_program` XML ni tuzib shu atributga yozadi, `ProgNo = 1` |
+| Dasturi yo'q kontroller | Run boshlanmaydi: "The signal groups defined in Vissim are different from those in the external data files" | xato `details.vissim_messages` da keladi |
+| `<cmd display="3" begin=...>` / `<cmd display="1" begin=...>` | Yashil / qizil boshlanadigan lahza (ms). Qizil-sariq yashildan **oldin**, sariq qizildan **oldin** ko'rsatiladi | tool `green_end_s` ga sariq vaqtini qo'shib qizil boshlanishini hisoblaydi |
+| Tekshiruv: sikl 60 s, yashil 10–30 s, sariq 3 s, qizil-sariq 1 s | 5 s — `RED`, 9 — `REDAMBER`, 20 — `GREEN`, 31 — `AMBER`, 34 — `RED`, 80 — `GREEN`, 100 — `RED` | `tests/real/test_real_build_network.py` |
+| Dastur kontrollerning barcha guruhlarini qamrashi shart | aks holda yuqoridagi xato | tool ro'yxatda yo'q mavjud guruh uchun `INVALID_ARGUMENT`, yo'q guruhni o'zi yaratadi |
+
+## Fayl, xabar va litsenziya xatti-harakatlari (haqiqiy Vissim 2026)
+
+| Nima | Kuzatilgan | Kodda |
+|---|---|---|
+| Ildiz atributlari `InputFile`, `WorkingFolder` | Saqlangan tarmoqda `"net1.inpx"` va papka (oxirida `\`); fayli yo'q tarmoqda bo'sh | `vissim_start_simulation` bo'sh `InputFile` da rad etadi |
+| Fayli yo'q tarmoqda `RunContinuous()` | Vissim "Файл сохранить как" dialogini ochadi, COM osiladi | yuqoridagi rad etish; `TIMEOUT_HUNG` xabarida ochiq oynalar nomi ko'rsatiladi |
+| `<tarmoq>_NNN.err` | Run boshlanmaganda Vissim sababni shu faylga yozadi (tab bilan ajratilgan, UTF-8 BOM) | job xatosiga `vissim_messages` sifatida qo'shiladi |
+| `%TEMP%\VISSIM\vissim_msgs.txt` | Vissim'ning joriy xabarlar jurnali (daraja nomlari interfeys tilida) | yuklash muvaffaqiyatsiz bo'lganda yangi, "odatiy bo'lmagan" qatorlar xatoga qo'shiladi |
+| Run boshlanmay qolgandan keyin | Sabab tuzatilsa ham, `Stop()` dan keyin ham keyingi run "Не удалось инициализировать цикл имитации"; tarmoqni fayldan qayta yuklash yordam beradi | xato maslahati: saqlash → `vissim_load_network` |
+| Academic litsenziya cheklovlari | "максимальный размер сети (10000 m) ... превышен", "Максимальное количество светосигнальных устройств (20) ... превышено" — tarmoq yuklanmaydi | xabar foydalanuvchiga yetkaziladi |
+
 ## Jarayon xatti-harakatlari (M6 da tekshirildi, 2026-11-18)
 
 | Nima | Kodda | M6 natijasi |

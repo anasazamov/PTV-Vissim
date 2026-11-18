@@ -161,7 +161,7 @@ COM" deydi — bu ham muhim natija: test hisobotiga aynan shunday yozing.
 `test_killed_server_leaves_no_vissim`). Buni haqiqiy Claude Code bilan bir marta tekshiring:
 1. Sinov papkasida (masalan `D:\VissimProjects\m6`) PLAN.md 9.1 dagi `.mcp.json` ni yarating
    (`command` — `D:\PTV-Vissim\.venv\Scripts\python.exe`, `VISSIM_ALLOWED_DIRS` — shu papka).
-2. Shu papkada Claude Code'ni oching, `/mcp` → `vissim ✔` va 22 ta tool ko'rinishini tekshiring.
+2. Shu papkada Claude Code'ni oching, `/mcp` → `vissim ✔` va 24 ta tool ko'rinishini tekshiring.
 3. Claude'dan `vissim_connect` ni chaqirishni so'rang; Task Manager'da `Vissim260.exe -Embedding` paydo bo'ladi.
 4. Claude Code oynasini yoping (yoki terminalda `/exit`).
 5. 10 s ichida Task Manager'da shu `Vissim260.exe` yo'qolishi kerak.

@@ -11,7 +11,7 @@
                              is WARN, the same name in two scopes is FAIL), command = runtime python, -P in the
                              arguments, health status
     4. configuration       - "python -X utf8 -P -m vissim_mcp --check" with the registered environment
-    5. MCP smoke           - initialize -> tools/list (22 tools) -> vissim_health over stdio
+    5. MCP smoke           - initialize -> tools/list (24 tools) -> vissim_health over stdio
     6. COM ProgID          - the ProgID/CLSID is registered and its LocalServer32 executable exists
     7. CodeMeter           - the CodeMeter license service is running
     8. Vissim license      - PTV licenses listed by "cmu --list-network" (Demo/Student licenses have no COM module;
