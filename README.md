@@ -19,7 +19,7 @@ Loyihaning yagona manbai — [`PLAN.md`](PLAN.md); bosqichlararo kelishuvlar —
 | **M6 — Haqiqiy Vissim'da tekshirish** | **avtomatik qismi bajarildi** (2026-11-18, PTV Vissim Academic 2026 SP 10): COM nomlari tasdiqlandi, `tests/real` o'tdi, topilgan farqlar tuzatildi ([`docs/test-report-v1.md`](docs/test-report-v1.md)). Qo'lda bajariladigan C1–C3 qadamlar qolgan ([`docs/m6-runbook.md`](docs/m6-runbook.md), 4-bo'lim) |
 | M7 — Integratsiya va reliz | bajarildi: o'rnatuvchi, doctor, ro'yxatdan o'tkazish yordamchisi, misollar, hujjatlar. `v1.0.0` tegi M6 ning qo'lda qadamlaridan keyin qo'yiladi |
 
-Server versiyasi hozir `1.1.0rc1` (`src/vissim_mcp/__init__.py`). PLAN 7 dagi 22 ta toolga ikkita qo'shimcha
+Server versiyasi hozir `1.1.0rc2` (`src/vissim_mcp/__init__.py`). PLAN 7 dagi 22 ta toolga ikkita qo'shimcha
 qo'shilgan: `vissim_call_method` (tarmoq qurish) va `vissim_set_signal_program` (svetofor dasturi).
 
 ## Talablar
@@ -250,13 +250,15 @@ Tavsiya etilgan sozlamalar (PLAN 9.2–9.3):
 - **Fayl tizimi — fail-closed.** Fayl operatsiyalari faqat `VISSIM_ALLOWED_DIRS` ichida (yo'l avval to'liq
   ochiladi: `..`, 8.3 qisqa nomlar, junction/symlink; `D:\A` va `D:\A2` farqlanadi). `models\original` — faqat
   o'qish. Kengaytmalar oq ro'yxati: yuklash `.inpx`/`.layx`, saqlash `.inpx`, eksport `.csv`. NTFS ADS rad etiladi.
-- **Atributlar.** Nomida File/Path/Folder/Dir bo'lgan atributga `vissim_set_attributes` faqat ruxsat etilgan
-  papkalar ichidagi yo'lni (masalan kontrollerning `.sig` fayli), sonni, mantiqiy yoki bo'sh qiymatni yozadi;
-  boshqa qiymat — `ATTRIBUTE_DENIED` (`VISSIM_ALLOW_PATH_ATTRS=1` bo'lmasa). Bulk yozish va simulyatsiya `extra`
+- **Atributlar.** Nomida File/Path/Folder/Dir bo'lgan atributga `vissim_set_attributes` sonni, mantiqiy yoki
+  bo'sh qiymatni yozadi; yo'l esa faqat ma'lumot fayli atributlariga (`SupplyFile1–3`, `PathFilename`,
+  `ModelFilename`) va faqat ruxsat etilgan papkalar ichida. Kod yuklaydigan atributlar (`ScriptFile`, `ProgFile`,
+  `…DLLFile`) va boshqa har qanday yo'l — `ATTRIBUTE_DENIED` (`VISSIM_ALLOW_PATH_ATTRS=1` bo'lmasa). Bulk yozish va simulyatsiya `extra`
   parametrida bunday atributlar butunlay taqiqlangan.
 - **Metodlar.** `vissim_call_method` faqat tarmoqni tahrirlovchi metodlarni chaqiradi; `LoadNet`, `SaveNetAs`,
-  `Import…`, `Export…`, `Exit`, `RunContinuous` kabi metodlar rad etiladi (fayllar va simulyatsiya o'z toollari va
-  siyosati orqali). Simulyatsiya job'i ishlab turganda yoki pauzada bo'lsa tahrirlash rad etiladi.
+  `Import…`, `Export…`, `Exit`, `RunContinuous` kabi metodlar va skript qo'shuvchi `AddScript` rad etiladi; fayl
+  yo'li bo'lgan argument ruxsat etilgan papkalar ichida bo'lishi shart. Job ishlab turganda chaqiruv rad etiladi;
+  pauzada faqat Vissim o'zi ruxsat bergan amallar o'tadi (masalan, avtomobil qo'shish).
 - **Kod bajarish.** `vissim_exec_python` faqat `VISSIM_MCP_ALLOW_EXEC=1` bilan; yoqilganda ham kod to'liq audit
   qilinadi. `settings.json.example` uni Claude Code darajasida ham taqiqlaydi.
 - **Jarayonlar.** Server faqat o'zi COM orqali ochgan (`-Embedding`) va PID + ishga tushgan vaqt bilan tasdiqlangan
@@ -387,11 +389,12 @@ qaytaradi; `ToolAnnotations` (`readOnlyHint`, `destructiveHint`) qo'yilgan.
   kontrollerlari sonini 20 ta bilan cheklaydi: Vissim bilan kelgan `Mainz` va `Boise` namunalari shu sababli
   yuklanmaydi (2579 havolali `Karlsruhe 3D` yuklanadi va to'liq ishlaydi). Bunday rad etishda server Vissim'ning
   o'z xabarini qaytaradi (`details.vissim_messages`). Kattaroq loyiha uchun to'liq litsenziya kerak.
-- **Tarmoq qurish doirasi.** `vissim_call_method` Vissim COM interfeysidagi barcha `Add…/Remove…` metodlarini
-  ochadi, lekin haqiqiy Vissim'da faqat havola, ulagich, transport oqimi, statik marshrut, svetofor kontrolleri/
-  guruhi/boshi, ma'lumot yig'ish nuqtasi/o'lchovi, sayohat vaqti o'lchovi va tugun sinalgan. Svetofor dasturi —
-  faqat qat'iy vaqtli (fixed-time); to'qnashuvchi yashillar tekshirilmaydi. Orqa fon rasmi, 3D modellar, jamoat
-  transporti, piyodalar, dinamik taqsimlash sinalmagan.
+- **Tarmoq qurish doirasi.** `vissim_call_method` orqali `Net` ostidagi 80 kolleksiyaning `Add…/Duplicate…/
+  Remove…` metodlari haqiqiy Vissim'da sinalgan (ro'yxat va argument formatlari: `docs/com-names.md`, "Tarmoq qurish
+  metodlari"). Massiv argumentlari **tekis** ro'yxat bo'lishi kerak (`[x1, y1, x2, y2, ...]`); noto'g'ri shaklni
+  Vissim jimgina e'tiborsiz qoldiradi — server buni xato sifatida qaytaradi. Svetofor dasturi — faqat qat'iy vaqtli
+  (fixed-time); to'qnashuvchi yashillar tekshirilmaydi. Sinalmagan: piyoda va jamoat transporti bilan simulyatsiya,
+  dinamik taqsimlash yo'llari, haqiqiy orqa fon rasmi/3D model fayllari, bir necha funksiya formati.
 - **Run boshlanmay qolgandan keyin** Vissim shu sessiyada keyingi runlarni ham boshlamaydi: tuzatilgan tarmoqni
   saqlab `vissim_load_network` bilan qayta yuklash kerak (xato maslahatida aytiladi).
 - **Q7 (ma'lumot siyosati) ochiq.** Yuridik bo'lim tasdig'igacha faqat test modellari.

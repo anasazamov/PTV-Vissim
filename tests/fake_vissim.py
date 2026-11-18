@@ -896,6 +896,47 @@ class FakeCollection(FakeComObject):
         return obj
 
     @com_method
+    def AddSpeedDistribution(self, Key: Any, SpeedDistrDatPts: Any) -> FakeNetObject | None:
+        """Like real Vissim 2026: data points are a FLAT list [x1, y1, x2, y2, ...]; any other shape is
+        accepted without an error - and nothing is created (the call returns nothing)."""
+        points = SpeedDistrDatPts
+        flat = (
+            isinstance(points, Sequence)
+            and not isinstance(points, (str, bytes))
+            and len(points) >= 4
+            and len(points) % 2 == 0
+            and all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in points)
+        )
+        if not flat:
+            return None
+        self._require_no_run("AddSpeedDistribution")
+        return self._add(self._next_key(Key))
+
+    @com_method
+    def AddQuietly(self, Key: Any) -> None:
+        """An Add method that creates its object but returns nothing (the caller finds it by its key)."""
+        self._add(self._next_key(Key))
+
+    @com_method
+    def AddTimeDistribution(self, Key: Any, Type: Any, DurDistrDataPts: Any) -> FakeNetObject:
+        """``Type`` is an enumeration: pywin32 refuses a name with ValueError before anything is sent."""
+        if isinstance(Type, str):
+            raise ValueError(f"invalid literal for int() with base 10: {Type!r}")
+        return self._add(self._next_key(Key))
+
+    @com_method
+    def AddBackgroundImage(self, Key: Any, PathFilename: str, CoordTR: str, CoordBL: str) -> FakeNetObject:
+        return self._add(self._next_key(Key), {"PathFilename": PathFilename})
+
+    @com_method
+    def ReplaceAll(self, Elements: Any) -> None:
+        self.replaced_with = Elements
+
+    @com_method
+    def AddScript(self, Key: Any) -> FakeNetObject:
+        return self._add(self._next_key(Key))
+
+    @com_method
     def AddSignalGroup(self, Key: Any) -> FakeNetObject:
         self._require_no_run("AddSignalGroup")
         return self._add(self._next_key(Key))

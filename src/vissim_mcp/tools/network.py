@@ -38,7 +38,7 @@ from ..errors import (
     is_com_error,
     is_connection_error,
 )
-from ..jobs import job_running_error
+from ..jobs import JobState, job_running_error
 from ..resolver import Segment, format_path, is_com_object, parse_path
 from ..resolver import resolve as resolve_path
 from ..service import VissimService
@@ -47,10 +47,26 @@ from ._common import AuditRecord, FlagArg, StringArg, flag, register_tool
 from .objects import _interface_name, _require_object, plain_value
 
 #: Method name prefixes that edit the network (verified against the Vissim 2026 type library, M6).
-ALLOWED_PREFIXES = ("Add", "Remove", "Duplicate", "Generate", "Recalculate", "Invert", "Move")
-#: An allowed prefix is not enough when the name says the method works on files (e.g. AddFromFile). "Dir" of
-#: the attribute policy is left out here: GenerateOppositeDirection and InvertDirection are network edits.
-FILE_WORDS = ("file", "path", "folder")
+#: Update* / Replace* are the editing methods of sub-collections: route.UpdateLinkSequence([...]),
+#: distribution.SpeedDistrDatPts.ReplaceAll([...]).
+ALLOWED_PREFIXES = (
+    "Add",
+    "Remove",
+    "Duplicate",
+    "Generate",
+    "Recalculate",
+    "Invert",
+    "Move",
+    "Update",
+    "Replace",
+)
+#: An allowed prefix is not enough when the name says the method works on files (e.g. AddFromFile) or adds
+#: code that Vissim would run (AddScript). "Dir" of the attribute policy is left out here:
+#: GenerateOppositeDirection and InvertDirection are network edits. "Path" is matched as a whole word part
+#: only through FILE_NAME_RE below, because Net.Paths.AddPath... are route paths, not file paths.
+FILE_WORDS = ("file", "folder", "script")
+#: Prefixes after which a method that returns no object must at least have changed the collection.
+CREATING_PREFIXES = ("add", "duplicate")
 #: The only method allowed on the root object: an empty network.
 ROOT_METHODS = ("New",)
 MAX_ARGS = 20
@@ -59,7 +75,23 @@ MAX_TEXT_CHARS = 200_000  # a WKT line string of a long link
 MAX_INT = 2**63 - 1
 _ARG_DEPTH = 3
 _METHOD_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+#: A string argument that is a file system path (drive, UNC, rooted or dotted-relative, or any backslash).
+#: WKT geometry, colours ("ff994400") and names never look like this.
+_PATH_LIKE_RE = re.compile(r"^\s*(?:[A-Za-z]:[\\/]|\\\\|/|\.\.?[\\/])|\\")
+NOTHING_CREATED_HINT = (
+    "Vissim ignores an array argument of the wrong shape without an error. Array arguments are flat lists: "
+    "data points [x1, y1, x2, y2, ...], function points [x1, y1, yMin1, yMax1, x2, ...], priority rule "
+    'conflict markers [{"ref": lane}, pos, {"ref": lane}, pos, ...], compositions [{"ref": type}, '
+    '{"ref": speed distribution}, ...]. Check the parameters with vissim_describe.'
+)
+ENUM_HINT = (
+    "A parameter that is an enumeration takes its number, not its name (e.g. AddUserDefinedDataAttribute "
+    "DataType: 1 Int, 2 Double, 3 Bool, 4 Text; AddVehicleRouteManagedLanes Type: 1 Managed, 2 General "
+    'purpose). An object parameter takes {"ref": "<object path>"}.'
+)
 _KEY_ATTRIBUTE = "No"
+#: Objects without a number: a lane is addressed by its Index (Net.Links[1].Lanes[2]).
+_KEY_FALLBACKS = ("Index",)
 METHOD_HINT = (
     "List the methods and their parameters with vissim_describe(path=...), e.g. "
     "vissim_describe(path='Net.Links') shows AddLink(Key, WktLinestring, LaneWidths)."
@@ -112,6 +144,8 @@ def check_method_allowed(method: str, on_root: bool) -> None:
             details={"method": method},
         )
     word = next((candidate for candidate in FILE_WORDS if candidate in folded), None)
+    if word is None and folded.endswith(("frompath", "topath", "pathname", "filepath")):
+        word = "path"
     if word is not None or not folded.startswith(tuple(prefix.casefold() for prefix in ALLOWED_PREFIXES)):
         reason = f"its name contains '{word}'" if word is not None else "it is not a network-editing method"
         raise VissimMcpError(
@@ -169,6 +203,44 @@ def _argument(value: Any, field: str, depth: int) -> Any:
     raise _invalid(f"{field} has an unsupported type ({type(value).__name__})")
 
 
+def check_path_arguments(args: list[Any], policy: Any) -> None:
+    """``ATTRIBUTE_DENIED`` for a string argument that is a file path outside the allowed directories.
+
+    A few editing methods take a file name (AddBackgroundImage(Key, PathFilename, ...), AddStatic3DModel,
+    AddModel2D3D(Key, [model files])): such a file must be inside ``VISSIM_ALLOWED_DIRS`` like every other
+    file this server touches."""
+
+    def walk(value: Any, field: str) -> None:
+        if isinstance(value, tuple):
+            for index, item in enumerate(value):
+                walk(item, f"{field}[{index}]")
+        elif isinstance(value, str) and _PATH_LIKE_RE.search(value):
+            try:
+                policy.check_location(value)
+            except VissimMcpError as err:
+                raise VissimMcpError(
+                    ErrorCode.ATTRIBUTE_DENIED,
+                    f"{field} is a file path outside the allowed directories: {err.message}",
+                    hint="A file given to a Vissim method must be inside VISSIM_ALLOWED_DIRS.",
+                    details={"argument": field},
+                ) from None
+
+    for index, value in enumerate(args):
+        walk(value, f"args[{index}]")
+
+
+def blocking_job(service: VissimService, on_root: bool) -> Any | None:
+    """The simulation job that forbids this call: a running job always; a paused one only for the root
+    method New (objects such as vehicles are added while a simulation is paused - Vissim itself refuses
+    network edits it cannot do during a run)."""
+    job = service.active_job()
+    if job is None:
+        return None
+    state = getattr(job, "state", None)
+    running = str(getattr(state, "value", state)) == JobState.RUNNING.value
+    return job if running or on_root else None
+
+
 def echo_args(args: list[Any]) -> list[Any]:
     """``args`` as JSON values again (for the result and the audit record)."""
 
@@ -201,16 +273,70 @@ def _describe_result(value: Any, target_label: str, target_is_root: bool) -> dic
         return {"value": plain_value(value)}
     described: dict[str, Any] = {"object": True, "interface": _interface_name(value)}
     key: Any = None
-    try:
-        key = plain_value(value.AttValue(_KEY_ATTRIBUTE))
-    except Exception as exc:
-        if is_connection_error(exc) or not is_com_error(exc):
-            raise
+    for name in (_KEY_ATTRIBUTE, *_KEY_FALLBACKS):
+        try:
+            key = plain_value(value.AttValue(name))
+        except Exception as exc:
+            if is_connection_error(exc) or not is_com_error(exc):
+                raise
+            continue
+        if key is not None:
+            break
     described["key"] = key
     if key is not None and not target_is_root:
         shown = f'"{key}"' if isinstance(key, str) else str(key)
         described["path"] = f"{target_label}[{shown}]"
     return described
+
+
+def _count(target: Any) -> int | None:
+    try:
+        return int(target.Count)
+    except Exception as exc:
+        if is_connection_error(exc):
+            raise
+        return None
+
+
+def _keys(target: Any) -> set[Any] | None:
+    try:
+        rows = target.GetMultipleAttributes((_KEY_ATTRIBUTE,))
+    except Exception as exc:
+        if is_connection_error(exc):
+            raise
+        return None
+    return {plain_value(row[0]) for row in rows or ()}
+
+
+def _created_object(
+    target: Any, label: str, method: str, count_before: int | None, keys_before: set[Any] | None
+) -> dict[str, Any] | None:
+    """For an Add*/Duplicate* call that returned no object: what it created, found by comparing the
+    collection before and after. Raises when the collection did not change - real Vissim 2026 accepts e.g.
+    AddSpeedDistribution(0, [[40, 0], [60, 1]]) (nested instead of flat) without an error and creates
+    nothing (M6)."""
+    count_after = _count(target)
+    if count_before is None or count_after is None:
+        return None
+    if count_after <= count_before:
+        raise VissimMcpError(
+            ErrorCode.INVALID_ARGUMENT,
+            f"Vissim accepted {label}.{method} without an error but created nothing "
+            f"(the collection still has {count_after} objects)",
+            hint=NOTHING_CREATED_HINT,
+            details={"count": count_after},
+        )
+    keys_after = _keys(target) if keys_before is not None else None
+    new_keys = (
+        sorted(keys_after - keys_before, key=str)
+        if keys_after is not None and keys_before is not None
+        else []
+    )
+    if len(new_keys) != 1:
+        return {"object": True, "interface": None, "key": None, "created": count_after - count_before}
+    key = new_keys[0]
+    shown = f'"{key}"' if isinstance(key, str) else str(key)
+    return {"object": True, "interface": None, "key": key, "path": f"{label}[{shown}]"}
 
 
 def call_method_task(
@@ -223,7 +349,7 @@ def call_method_task(
     ctx: WorkerContext,
 ) -> dict[str, Any]:
     """Resolve the target and the object arguments, call the method, describe what it returned."""
-    job = service.active_job()  # a job may have been started after the tool's own check
+    job = blocking_job(service, not segments)  # a job may have been started after the tool's own check
     if job is not None:
         raise job_running_error(job)
     label = format_path(segments) if segments else "Vissim"
@@ -238,9 +364,20 @@ def call_method_task(
     resolved = [_materialize(ctx.vissim, value) for value in args]
     if dry_run:
         return {"called": False}
+    creates = bool(segments) and method.casefold().startswith(CREATING_PREFIXES)
+    count_before = _count(target) if creates else None
+    keys_before = _keys(target) if count_before is not None else None
     progress["called"] = True
     try:
         value = member(*resolved)
+    except (TypeError, ValueError) as exc:
+        # pywin32 could not convert an argument to the parameter's COM type, e.g. the name of an
+        # enumeration value ("NORMAL") where its number is expected. Nothing was sent to Vissim.
+        progress["called"] = False
+        raise _invalid(
+            f"{label}.{method}: an argument has the wrong type ({type(exc).__name__}: {exc})",
+            hint=f"{ENUM_HINT} {METHOD_HINT}",
+        ) from None
     except Exception as exc:
         if is_connection_error(exc) or not is_com_error(exc):
             raise
@@ -248,7 +385,12 @@ def call_method_task(
         if not error.hint or "vissim_describe" not in error.hint:
             error.hint = f"{error.hint} {METHOD_HINT}".strip()
         raise error from None
-    return {"called": True, "returned": _describe_result(value, label, not segments)}
+    returned = _describe_result(value, label, not segments)
+    if creates and not is_com_object(value):
+        found = _created_object(target, label, method, count_before, keys_before)
+        if found is not None:
+            returned = found
+    return {"called": True, "returned": returned}
 
 
 # --- tool
@@ -275,12 +417,20 @@ def register(mcp: FastMCP, service: VissimService) -> None:
           args=[0, {"ref": "Net.Links[1]"}, 20], then on "...[1].VehRoutSta": "AddVehicleRouteStatic",
           args=[0, {"ref": "Net.Links[2]"}, 150]
         - path="Net.Links", method="RemoveLink", args=[{"ref": "Net.Links[7]"}]
-        An object argument is {"ref": "<object path>"}; an array argument is a JSON array.
+        - path="Net.DesSpeedDistributions", method="AddDesSpeedDistribution", args=[0, [40, 0, 60, 1]]
+        An object argument is {"ref": "<object path>"}. An array argument is a FLAT JSON array: data points
+        [x1, y1, x2, y2, ...], priority rule conflict markers [{"ref": lane}, pos, {"ref": lane}, pos],
+        compositions [{"ref": vehicle type}, {"ref": speed distribution}, ...]. An enumeration parameter
+        takes its number. Objects inside objects have their own collections (Net.Links[1].Lanes: AddLane;
+        a route: UpdateLinkSequence; a distribution's data points: ReplaceAll).
 
-        Allowed: methods starting with Add, Remove, Duplicate, Generate, Recalculate, Invert or Move on
-        network objects, and New on the root. Not allowed while a simulation job is running or paused.
-        A new network has no file: save it with vissim_save_network before starting a simulation. Nothing
-        is saved automatically. Written to the audit log.
+        Allowed: methods starting with Add, Remove, Duplicate, Generate, Recalculate, Invert, Move, Update
+        or Replace on network objects, and New on the root; not methods that take script code, and a file
+        argument must be inside the allowed directories. Refused while a simulation job is running; while a
+        job is paused only what Vissim itself permits during a run works (e.g. Net.Vehicles:
+        AddVehicleAtLinkPosition). An Add/Duplicate call that creates nothing is an error. A new network
+        has no file: save it with vissim_save_network before starting a simulation. Nothing is saved
+        automatically. Written to the audit log.
 
         Parameters: path - the object that has the method ("Vissim" or "" is the root); method - its name;
         args - positional arguments; dry_run - true only checks that the object, the method and the
@@ -307,8 +457,9 @@ def register(mcp: FastMCP, service: VissimService) -> None:
             check_method_allowed(name, on_root=not segments)
             label = format_path(segments) if segments else "Vissim"
             audit.update(path=label, method=name, dry_run=dry)
+            check_path_arguments(parsed, service.policy)
             service.ensure_connected()
-            job = service.active_job()
+            job = blocking_job(service, not segments)
             if job is not None:
                 raise job_running_error(job)
             task = functools.partial(call_method_task, segments, name, parsed, dry, service, progress)

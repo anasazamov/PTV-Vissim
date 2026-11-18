@@ -627,6 +627,19 @@ async def test_path_attributes_may_point_into_the_allowed_directories(
         assert denied["error"]["code"] == "ATTRIBUTE_DENIED", (value, denied)
         assert "allowed directories" in denied["error"]["message"]
         assert "VISSIM_ALLOWED_DIRS" in denied["error"]["hint"]
+    # attributes that make Vissim load code stay denied even inside the allowed directories
+    h.vissim.add_object("Links", 501, ScriptFile="", ProgFile="", ExtDriverDLLFile="", EvalOutDir="")
+    for attribute in ("ScriptFile", "ProgFile", "ExtDriverDLLFile", "EvalOutDir"):
+        code = await call(
+            mcp, "vissim_set_attributes", {"path": "Net.Links[501]", "values": {attribute: str(inside)}}
+        )
+        assert code["error"]["code"] == "ATTRIBUTE_DENIED", (attribute, code)
+        assert "only data file attributes" in code["error"]["message"]
+        assert h.vissim.attribute("Links", 501, attribute) == ""
+        cleared = await call(
+            mcp, "vissim_set_attributes", {"path": "Net.Links[501]", "values": {attribute: ""}}
+        )
+        assert cleared["ok"] is True  # an empty value is not a path
     # bulk writes and simulation extras keep the strict rule
     bulk = await call(
         mcp,

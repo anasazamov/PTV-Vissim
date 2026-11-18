@@ -338,13 +338,22 @@ def check_attribute_writable(name: str, allow_path_attrs: bool) -> None:
         )
 
 
+#: File attributes that name a *data* file Vissim reads: signal supply files (.sig, .wtt ...), a background
+#: image, a 3D model. They may point into the allowed directories. Every other file attribute stays denied -
+#: above all those that make Vissim load and run code (Script.ScriptFile, SignalController.ProgFile and
+#: GuiFile, VehicleType.ExtDriverDLLFile ...), which would bypass VISSIM_MCP_ALLOW_EXEC.
+DATA_FILE_ATTRIBUTES = frozenset(
+    {"supplyfile1", "supplyfile2", "supplyfile3", "pathfilename", "modelfilename"}
+)
+
+
 def check_attribute_value(name: str, value: Any, allow_path_attrs: bool, policy: PathPolicy) -> None:
     """The attribute policy for one ``(name, value)`` pair of ``vissim_set_attributes``.
 
     A file/path attribute (:func:`path_attribute_word`) may be written when its value cannot leave the file
     policy: a number, a boolean or an empty value (``Link.Direction``-like false matches, clearing a file
-    name), or a path that resolves inside the allowed directories - e.g. the ``.sig`` file of a fixed-time
-    signal controller (``SupplyFile2``), which a network built through this server needs. Any other value is
+    name), or - for the data files of :data:`DATA_FILE_ATTRIBUTES` only - a path that resolves inside the
+    allowed directories, e.g. the ``.sig`` file of a signal controller (``SupplyFile2``). Any other value is
     ``ATTRIBUTE_DENIED`` unless ``VISSIM_ALLOW_PATH_ATTRS=1``.
     """
     if allow_path_attrs:
@@ -352,23 +361,26 @@ def check_attribute_value(name: str, value: Any, allow_path_attrs: bool, policy:
     word = path_attribute_word(name)
     if word is None or value is None or isinstance(value, (bool, int, float)):
         return
-    if isinstance(value, str):
-        if not value.strip():
-            return
+    if isinstance(value, str) and not value.strip():
+        return
+    base = _TRAILING_ARGS_RE.sub(lambda match: match.group("base"), name.strip())
+    if not isinstance(value, str):
+        reason = f"a {type(value).__name__} value is not a path"
+    elif _NON_ALNUM_RE.sub("", base).lower() not in DATA_FILE_ATTRIBUTES:
+        reason = "only data file attributes (SupplyFile1-3, PathFilename, ModelFilename) accept a path"
+    else:
         try:
             policy.check_location(value)
             return
         except VissimMcpError as err:
             reason = err.message
-    else:
-        reason = f"a {type(value).__name__} value is not a path"
     raise VissimMcpError(
         ErrorCode.ATTRIBUTE_DENIED,
-        f"writing attribute {name!r} is not allowed: its name contains '{word}' and the value is not a path "
-        f"inside the allowed directories ({reason})",
+        f"writing attribute {name!r} is not allowed: its name contains '{word}' ({reason})",
         hint=(
-            "File and path attributes may only point into VISSIM_ALLOWED_DIRS (vissim_health shows them); "
-            "put the file there, or set VISSIM_ALLOW_PATH_ATTRS=1 on a trusted machine."
+            "Data file attributes may only point into VISSIM_ALLOWED_DIRS (vissim_health shows them); other "
+            "file attributes - scripts, controller programs, DLLs - need VISSIM_ALLOW_PATH_ATTRS=1 on a "
+            "trusted machine."
         ),
         details={"attribute": name, "matched": word},
     )

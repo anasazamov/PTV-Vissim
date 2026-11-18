@@ -96,8 +96,13 @@ skriptdagi `PROBES` ro'yxatini ham o'zgartiring (`tests/unit/test_probe_com_name
 
 ## Tarmoq qurish metodlari (haqiqiy Vissim 2026 da tekshirildi, 2026-11-18)
 
-`vissim_call_method` chaqiradigan metodlar. "Sinalgan" — `tests/real/test_real_build_network.py` da haqiqiy Vissim'da
-ishlatilgan; qolganlari type library'dan o'qilgan (`vissim_describe` ko'rsatadi), lekin ishga tushirib ko'rilmagan.
+`vissim_call_method` chaqiradigan metodlar. "Sinalgan" — `tests/real/test_real_build_network.py` yoki
+`tests/real/test_real_methods.py` da haqiqiy Vissim'da ishlatilgan. Argument formatlari PTV ning rasmiy
+`Examples Training\COM\Network Objects Adding` misolidan olingan.
+
+**Muhim:** massiv argumenti noto'g'ri shaklda bo'lsa (masalan, tekis ro'yxat o'rniga ichma-ich `[[40, 0], [60, 1]]`),
+Vissim xato bermaydi va hech narsa yaratmaydi. Server buni kolleksiyani chaqiruvdan oldin va keyin solishtirib
+aniqlaydi va `INVALID_ARGUMENT` ("created nothing") qaytaradi.
 `Key = 0` — Vissim keyingi bo'sh raqamni o'zi tanlaydi; pozitsiyalar metrda; obyekt argumenti — `{"ref": "<yo'l>"}`.
 
 | Metod | Qayerda | Tekshiruv |
@@ -115,8 +120,26 @@ ishlatilgan; qolganlari type library'dan o'qilgan (`vissim_describe` ko'rsatadi)
 | `AddDataCollectionPoint(Key, Lane, Pos)` | `Net.DataCollectionPoints` | sinalgan |
 | `AddDataCollectionMeasurement(Key)` | `Net.DataCollectionMeasurements` | sinalgan; nuqtalar — `DataCollectionPoints` atributi (`"1"`) |
 | `AddVehicleTravelTimeMeasurement(Key, StartLink, StartPos, EndLink, EndPos)` | `Net.VehicleTravelTimeMeasurements` | sinalgan |
-| `AddNode(Key, WktPolygon)` | `Net.Nodes` | sinalgan (prototipda) |
-| `AddDesSpeedDecision`, `AddReducedSpeedArea`, `AddStopSign`, `AddPriorityRule`, `AddQueueCounter`, `AddDetector`, `AddParkingLot`, `AddPTLine`, `AddPTStop`, `AddArea`, `AddPedestrianInput`, `AddSection`, `AddLevel`, `AddVehicleType`, `AddVehicleComposition`, `GenerateOppositeDirection` va ularning `Remove…`/`Duplicate…` juftlari | tegishli kolleksiyalar | type library'da bor, **sinalmagan** |
+| `Add…(Key)` — faqat kalit oladigan metodlar: `AddVehicleType`, `AddVehicleClass`, `AddDrivingBehavior`, `AddLinkBehaviorType`, `AddDisplayType`, `AddLevel`, `AddZone`, `AddMatrix`, `AddDelayMeasurement`, `AddStoryboard`, `AddPedestrianType`, `AddPedestrianClass`, `AddWalkingBehavior`, `AddAreaBehaviorType`, `AddParkingLotGroup`, `AddManagedLanesFacility`, `AddElevatorGroup`, `AddEmiClassDistr`, `AddInformationSign3D`, `AddLaneMarkingType`, `AddAttributeModification`, `AddBoardDelType`, `Add…DistributionNormal` | tegishli kolleksiyalar | sinalgan |
+| `Add…(Key, Lane, Pos)`: `AddStopSign`, `AddDesSpeedDecision`, `AddReducedSpeedArea`, `AddPavementMarking`, `AddPTStop`, `AddParkingLot`, `AddDetector` (avval svetofor kontrolleri bo'lishi shart) | tegishli kolleksiyalar | sinalgan |
+| `Add…(Key, WktPolygon)`: `AddArea`, `AddObstacle`, `AddRamp`, `AddSection`, `AddElevator`, `AddNode`; `AddCameraPosition(Key, "POINT(x y z)")`, `AddTrafficSignal3D` | tegishli kolleksiyalar | sinalgan |
+| Taqsimotlar — **tekis** ro'yxat `[x1, y1, x2, y2, ...]`: `AddSpeedDistribution`, `AddPowerDistribution`, `AddWeightDistribution`, `AddTimeDistributionEmpirical`, `AddLocationDistribution`, `AddDistanceDistribution`, `AddOccupancyDistributionEmpirical`, `AddFreeDistributionEmpirical`; `AddColorDistribution(Key, ["ffrrggbb", ...])` | `Net.SpeedDistributions` va h.k. | sinalgan. Kolleksiya nomi Vissim 2026 da `SpeedDistributions` (misoldagi `DesSpeedDistributions` emas) |
+| Funksiyalar — tekis ro'yxat `[x, y, yMin, yMax, ...]`: `AddDesAccelerationFunction`, `AddDesDecelerationFunction`, `AddMaxAccelerationFunction`, `AddMaxDecelerationFunction` | tegishli kolleksiyalar | sinalgan |
+| `AddPriorityRule(Key, Lane, Pos, ConflictMarkers)` — markerlar tekis: `[lane, pos, lane, pos, ...]`; `ConflictMarkers.AddConflictMarker(Key, Lane, Pos)` | `Net.PriorityRules` | sinalgan |
+| `AddConnectorEx(Key, FromLanesPerLane, FromPos, ToLanesPerLane, ToPos, Wkt)` — har polosa uchun ro'yxat: `[[lane], [lane]]` | `Net.Links` | sinalgan |
+| `GenerateOppositeDirection(Link, NumberOfLanes)`, `Lanes.AddLane(Key, Width)` | `Net.Links`, `Net.Links[n].Lanes` | sinalgan (polosa kaliti — `Index`) |
+| Marshrut qarorlari: `AddVehicleRoutingDecisionPartial/Closure/ManagedLanes/Parking/Dynamic(...)` va marshrutlari `AddVehicleRoutePartial(Key)`, `AddVehicleRouteClosure(Key, DestLink, DestPos)`, `AddVehicleRouteManagedLanes(Key, Type)` (Type: 1 Managed, 2 General purpose), `AddVehicleRouteParking(Key, ParkLot)`; `route.UpdateLinkSequence([link, offset, ...])` | tegishli kolleksiyalar | sinalgan |
+| `AddVehicleComposition(Key, [vehType, speedDistr, ...])`, `VehCompRelFlows.AddVehicleCompositionRelativeFlow(VehType, DesSpeedDistr)`; `AddPedestrianComposition(Key, [...])` | tegishli kolleksiyalar | sinalgan |
+| `<distribution>.SpeedDistrDatPts.ReplaceAll([x1, y1, ...])` | taqsimot nuqtalari | sinalgan (`X`, `FX` atributlari bilan qayta o'qildi) |
+| `AddAbstractParkingLot(Key, Link, Pos, Zone)`, `AddPTLine(Key, EntryLink, DestLink, DestPos)`, `DepTimes.AddDepartureTime(Key, Dep)`, `Keyframes.AddKeyframe(Key)`, `TimeInts.AddTimeInterval(Key)`, `AddQueueCounter(Key, Link, Pos)`, `AddSCCommunication(Key)` (ikkita kontroller kerak), `AddFlowBundle` | tegishli kolleksiyalar | sinalgan |
+| Piyodalar: `AddPedestrianInput(Key, Area)`, `AddPedestrianRoutingDecisionStatic/Partial(Key, Area)`, `PedRoutSta.AddPedestrianRouteStaticOnArea(Key, Area)`, `AddPedestrianTravelTimeMeasurement(Key, StartArea, EndArea)`, `AddPedestrianAttributeDecision` | tegishli kolleksiyalar | sinalgan (yaratildi; piyoda simulyatsiyasi ishga tushirilmagan) |
+| `AddUserDefinedDataAttribute(Key, ObjType, NameShort, NameLong, DataType, SubAttrs, CanBeEmpty)` — `DataType` raqam: 1 Int, 2 Double, 3 Bool, 4 Text, 5 Filename, 6 TimePoint; `AddUserDefinedFormulaAttribute(..., Formula)`; `AddAlias(Key, ObjType, Attr, Name)` | `Net.UserDefinedAttributes`, `Net.Aliases` | sinalgan |
+| `AddTimeDistribution(Key, Type, pts)` va boshqa `Type` li metodlar — `Type` raqam (1, 2), nom (`"NORMAL"`) emas | taqsimotlar | sinalgan; nom berilsa `INVALID_ARGUMENT` |
+| Simulyatsiya paytida (job pauzada): `Net.Vehicles.AddVehicleAtLinkPosition(VehicleType, Link, Lane, Position, DesiredSpeed, Interaction)`, `RemoveVehicle(Vehicle)` | `Net.Vehicles` | sinalgan: `[100, 1, 1, 50, 50, true]` → avtomobil 1-havola 1-polosada 50 m da; simulyatsiyadan tashqarida Vissim rad etadi |
+| Har bir kolleksiyaning `Duplicate…(Source, NewKey)` va `Remove…(obj)` metodlari | 80 kolleksiya | sinalgan (yaratilgan obyekt nusxalandi va o'chirildi) |
+| `AddBackgroundImage(Key, PathFilename, ...)`, `AddStatic3DModel(Key, ModelFilename, ...)`, `AddModel2D3D(Key, [fayllar])` | fayl argumenti | fayl ruxsat etilgan papkalar ichida bo'lishi shart (tashqaridagisi `ATTRIBUTE_DENIED` — sinalgan); haqiqiy rasm/3D fayl bilan **sinalmagan** |
+| `AddScript`, `RemoveScript`, `DuplicateScript` | `Net.Scripts` | **taqiqlangan** (Vissim skriptni bajaradi) |
+| `AddBoardDelFunc`, `AddCurvSpeedFunc`, `AddLatDriftSpeedFunc`, `AddAreaBehaviorTypeElement`, `Net.Paths.AddPath…`, `Net.Pedestrians.AddPedestrianOnArea…`, `AddVehicleInParkingLot`, `AddVehicleInZone`, `AddVehicleToPTLine` | — | argument formati aniqlanmagan yoki **sinalmagan** (Vissim xato qaytaradi) |
 
 Baholash yozuvini yoqish (`vissim_set_attributes(path="Evaluation", ...)`): `DataCollCollectData`, `VehTravTmsCollectData`
 — sinalgan.

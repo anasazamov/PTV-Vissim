@@ -750,9 +750,10 @@ def register(mcp: FastMCP, service: VissimService) -> None:
         """Write attributes of one object: read the old values, write the new ones, read them back.
 
         Always call it first with dry_run=true, show the old and new values to the user and get approval.
-        An attribute whose name contains File, Path, Folder or Dir accepts only a path inside the allowed
-        directories (e.g. the .sig file of a signal controller), a number, a boolean or an empty value; any
-        other value is refused (ATTRIBUTE_DENIED) unless VISSIM_ALLOW_PATH_ATTRS=1. An attribute whose old
+        An attribute whose name contains File, Path, Folder or Dir accepts a number, a boolean or an empty
+        value; the data file attributes SupplyFile1-3, PathFilename and ModelFilename also a path inside the
+        allowed directories. Anything else - scripts, controller programs, DLLs, other paths - is refused
+        (ATTRIBUTE_DENIED) unless VISSIM_ALLOW_PATH_ATTRS=1. An attribute whose old
         value cannot be read is not written; earlier writes are not rolled back when a later one fails. Every
         call - dry runs and refusals too - is written to the audit log. Changes stay in Vissim only: save
         them with vissim_save_network.

@@ -88,6 +88,28 @@ Academic litsenziya cheklovlari (Vissim'ning o'z xabarlari): tarmoq hajmi **10 0
 soni **20** tadan oshmasligi kerak. `Mainz - Static Routes` birinchisiga, `Signalization Boise` ikkinchisiga
 tushdi. Bu server kamchiligi emas, lekin kattaroq loyihalar uchun to'liq litsenziya kerakligini bildiradi.
 
+### Barcha tahrirlovchi metodlarni sinash (2026-11-18)
+
+`vissim_describe` orqali haqiqiy Vissim'dan `Net` ostidagi **80 kolleksiyaning 250 dan ortiq** `Add…/Duplicate…/
+Remove…/Generate…` metodi ro'yxati olindi va har biri `vissim_call_method` orqali chaqirildi; natijada doimiy test
+`tests/real/test_real_methods.py` yozildi (2 ta test, 97 s: 80 ga yaqin yaratuvchi chaqiruv, ichki kolleksiyalar,
+nusxalash/o'chirish, rad etiladigan holatlar, pauzadagi simulyatsiyaga avtomobil qo'shish).
+
+| # | Topilma (haqiqiy Vissim'da) | Tuzatish |
+|---|---|---|
+| 20 | **18 ta metod jimgina hech narsa qilmagan**: massiv argumenti ichma-ich berilganda (`AddSpeedDistribution(0, [[40, 0], [60, 1]])`, `AddPriorityRule`, `AddConnectorEx`, funksiyalar) Vissim xato qaytarmaydi, obyekt ham yaratmaydi — server esa `ok: true` degan | `Add…/Duplicate…` obyekt qaytarmasa, kolleksiya chaqiruvdan oldin/keyin solishtiriladi: o'zgarmagan bo'lsa `INVALID_ARGUMENT` ("created nothing") va to'g'ri (tekis) formatlar maslahati; obyekt yaratilgan-u qaytarilmagan bo'lsa — kaliti topib beriladi |
+| 21 | Enum parametrga nom berilsa (`"NORMAL"`, `"Integer"`) pywin32 `ValueError` beradi — server buni `INTERNAL` (ichki xato) deb qaytargan | `INVALID_ARGUMENT` va "enum raqam bilan beriladi" maslahati |
+| 22 | `AddScript` va fayl yo'li oladigan metodlar (`AddBackgroundImage`, `AddStatic3DModel`, `AddModel2D3D`) ruxsat ro'yxatidan o'tib ketardi — fayl siyosatini va `vissim_exec_python` taqiqini chetlab o'tish yo'li | Skript metodlari taqiqlandi; yo'lga o'xshash har qanday satr argumenti ruxsat etilgan papkalar ichida bo'lishi shart |
+| 23 | `vissim_set_attributes` fayl atributlari uchun yumshatilgan qoida `ScriptFile`, `ProgFile`, `…DLLFile` kabi **kod yuklaydigan** atributlarga ham tegishli bo'lib qolgan edi | Yumshatish faqat ma'lumot fayllariga (`SupplyFile1–3`, `PathFilename`, `ModelFilename`) qoldirildi |
+| 24 | Ichki kolleksiya metodlari (`route.UpdateLinkSequence`, `…DatPts.ReplaceAll`) ruxsat etilmagan edi | `Update…` va `Replace…` prefikslari qo'shildi |
+| 25 | Job pauzada turganda har qanday metod rad etilardi — simulyatsiya paytida avtomobil qo'shib bo'lmasdi | Faqat ishlayotgan job rad etadi; pauzada chaqiruv Vissim'ga yuboriladi (tarmoq tahririni Vissim o'zi rad etadi), `New` — har qanday faol job'da rad etiladi |
+| 26 | Polosa (`AddLane`) uchun javobda kalit yo'q edi | Kalit sifatida `Index` qaytadi |
+
+Sinalmay qolganlari docs/com-names.md jadvalining oxirgi qatorlarida: argument formati aniqlanmagan bir necha
+funksiya (`AddBoardDelFunc`, `AddCurvSpeedFunc`, `AddLatDriftSpeedFunc`), dinamik taqsimlash yo'llari (`Net.Paths`),
+simulyatsiya paytida piyoda qo'shish, va haqiqiy rasm/3D fayl bilan `AddBackgroundImage`/`AddStatic3DModel`.
+Piyoda va jamoat transporti obyektlari **yaratildi**, lekin ular bilan simulyatsiya o'tkazilmagan.
+
 ### Ochiq qolganlar
 
 - **Qo'lda qadamlar C1, C2, C3** (docs/m6-runbook.md, 4-bo'lim) o'tkazilmagan: ular loyiha egasining harakatini talab
@@ -99,8 +121,8 @@ tushdi. Bu server kamchiligi emas, lekin kattaroq loyihalar uchun to'liq litsenz
 - Bitta Vissim versiyasi/tili bilan sinalgan. Modellar: `COM Basic Commands` (34 havola), `Karlsruhe 3D` (2579
   havola) va noldan qurilgan chorraha. 10 000 m dan katta yoki 20 tadan ko'p kontrollerli tarmoqlar litsenziya
   sababli sinalmadi; soatlab davom etadigan real yuklama ham sinalmagan (Karlsruhe'da 900 s — 20 s).
-- `vissim_call_method` orqali ochiladigan metodlarning hammasi ham sinalmagan (docs/com-names.md, "Tarmoq qurish
-  metodlari"): jamoat transporti, piyodalar, to'xtash joylari, ustuvorlik qoidalari va h.k.
+- `vissim_call_method`: 80 kolleksiyaning metodlari sinalgan (yuqoridagi bo'lim); bir necha metod formati
+  aniqlanmagan, piyoda va jamoat transporti obyektlari bilan simulyatsiya o'tkazilmagan.
 - Svetofor: faqat qat'iy vaqtli dastur; to'qnashuvchi yashillar va oraliq vaqtlar tekshirilmaydi.
 
 ---
@@ -175,10 +197,10 @@ Buyruqlar (repozitoriya ildizida):
 .\.venv\Scripts\python.exe -X utf8 -m ruff check src tests scripts
 ```
 
-Natija (2026-11-18, M6 tuzatishlari va kengaytmadan keyin): **1016 passed, 1 skipped, 16 deselected** (~90 s);
+Natija (2026-11-18, M6 tuzatishlari va kengaytmadan keyin): **1022 passed, 1 skipped, 18 deselected** (~90 s);
 ruff toza.
 Skip: `tests/unit/test_policy.py::test_symlink_escape_is_denied` — bu kompyuterda symlink yaratish uchun huquq yo'q
-(`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 16 deselected — `tests/real`.
+(`WinError 1314`); junction va 8.3 nomlar bilan chetlab o'tish testlari o'tadi. 18 deselected — `tests/real`.
 2026-10-27 dagi (M6 tayyorgarlik) natija: 908 passed; M7 dan keyin 970.
 
 Bosqichlar tarixi (commit'lar bo'yicha):

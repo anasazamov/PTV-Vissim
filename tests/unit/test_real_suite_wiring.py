@@ -31,6 +31,8 @@ EXPECTED = {
     "test_real_failures.py::test_stdin_eof_exits_fast_and_closes_vissim",
     "test_real_encoding.py::test_non_ascii_path_round_trip",
     "test_real_build_network.py::test_build_a_network_from_scratch_and_simulate",
+    "test_real_methods.py::test_network_editing_methods",
+    "test_real_methods.py::test_vehicles_are_added_to_a_paused_simulation",
     "test_real_large_model.py::test_large_model_workflow[mainz-motorway]",
     "test_real_large_model.py::test_large_model_workflow[karlsruhe-intersection]",
     "test_real_large_model.py::test_large_model_workflow[boise-signals]",

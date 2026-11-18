@@ -16,7 +16,7 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult
 
-from service_harness import Harness
+from service_harness import Harness, StubJob, StubRegistry
 from vissim_mcp.errors import ErrorCode, VissimMcpError
 from vissim_mcp.server import build_server
 from vissim_mcp.tools import network
@@ -254,23 +254,146 @@ async def test_vissim_errors_and_missing_paths(
     assert h.service.health()["connected"] is True
 
 
-async def test_refused_while_a_job_is_active(setup: tuple[Harness, FastMCP]) -> None:
+async def test_running_job_refuses_and_paused_job_leaves_it_to_vissim(setup: tuple[Harness, FastMCP]) -> None:
+    """Running: refused. Paused: the call goes to Vissim (vehicles are added to a paused simulation), which
+    itself refuses what cannot be done during a run; New is refused while any job is active."""
     h, mcp = setup
     h.vissim.set_simulation_attribute("SimPeriod", 600)
     started = await call(mcp, "vissim_start_simulation", {"runs": 1, "pause_at": [100]})
     assert started["ok"] is True
+    add = {"path": "Net.Links", "method": "AddLink", "args": [0, "LINESTRING(0 0, 1 0)", [3]]}
+    status: dict[str, Any] = {}
     for _ in range(200):
         status = await call(mcp, "vissim_wait_simulation", {"max_wait_s": 1})
         if status["state"] == "paused":
             break
     assert status["state"] == "paused"
-    refused = await call(
-        mcp, TOOL, {"path": "Net.Links", "method": "AddLink", "args": [0, "LINESTRING(0 0, 1 0)", [3]]}
-    )
-    assert refused["error"]["code"] == "JOB_RUNNING"
+    during_pause = await call(mcp, TOOL, add)
+    assert during_pause["error"]["code"] == "COM_ERROR", during_pause  # the fake refuses edits during a run
+    assert "simulation run is in progress" in during_pause["error"]["message"]
     new = await call(mcp, TOOL, {"path": "Vissim", "method": "New"})
     assert new["error"]["code"] == "JOB_RUNNING"
     await call(mcp, "vissim_stop_simulation")
+
+
+async def test_running_job_is_refused(setup: tuple[Harness, FastMCP]) -> None:
+    h, mcp = setup
+    job = StubJob(generation=h.service.generation)
+    h.service.jobs = StubRegistry(job)
+    refused = await call(
+        mcp, TOOL, {"path": "Net.Links", "method": "AddLink", "args": [0, "LINESTRING(0 0, 1 0)", [3]]}
+    )
+    assert refused["error"]["code"] == "JOB_RUNNING", refused
+    job.state = "finished"
+
+
+async def test_an_add_that_creates_nothing_is_an_error(
+    setup: tuple[Harness, FastMCP], isolated_env: dict[str, Path]
+) -> None:
+    """Real Vissim 2026 accepts AddSpeedDistribution(0, [[40, 0], [60, 1]]) - nested instead of flat -
+    without an error and creates nothing; 18 methods behaved like that through MCP (M6)."""
+    h, mcp = setup
+    before = len(h.vissim.collection("Links")._all())
+    nested = await call(
+        mcp, TOOL, {"path": "Net.Links", "method": "AddSpeedDistribution", "args": [0, [[40, 0], [60, 1]]]}
+    )
+    assert nested["error"]["code"] == "INVALID_ARGUMENT", nested
+    assert "created nothing" in nested["error"]["message"]
+    assert "flat" in nested["error"]["hint"] and "[x1, y1, x2, y2, ...]" in nested["error"]["hint"]
+    assert len(h.vissim.collection("Links")._all()) == before
+
+    flat = await call(
+        mcp, TOOL, {"path": "Net.Links", "method": "AddSpeedDistribution", "args": [0, [40, 0, 60, 1]]}
+    )
+    assert flat["ok"] is True and flat["returned"]["key"] is not None, flat
+    assert len(h.vissim.collection("Links")._all()) == before + 1
+
+    records = audit_records(isolated_env["audit"])
+    assert records[0]["ok"] is False and records[0]["called"] is True
+    assert records[1]["ok"] is True
+
+
+async def test_an_add_that_returns_nothing_is_found_by_its_key(setup: tuple[Harness, FastMCP]) -> None:
+    h, mcp = setup
+    added = await call(mcp, TOOL, {"path": "Net.Links", "method": "AddQuietly", "args": [4242]})
+    assert added["ok"] is True, added
+    assert added["returned"] == {"object": True, "interface": None, "key": 4242, "path": "Net.Links[4242]"}
+    assert h.vissim.collection("Links")._find(4242) is not None
+
+
+async def test_an_enumeration_given_by_name_is_an_argument_error(setup: tuple[Harness, FastMCP]) -> None:
+    """pywin32 raises ValueError for the name of an enumeration value; that was reported as INTERNAL (M6)."""
+    _h, mcp = setup
+    wrong = await call(
+        mcp, TOOL, {"path": "Net.Links", "method": "AddTimeDistribution", "args": [0, "NORMAL", [0, 0, 1, 1]]}
+    )
+    assert wrong["error"]["code"] == "INVALID_ARGUMENT", wrong
+    assert "wrong type" in wrong["error"]["message"] and "its number" in wrong["error"]["hint"]
+    right = await call(
+        mcp, TOOL, {"path": "Net.Links", "method": "AddTimeDistribution", "args": [0, 1, [0, 0, 1, 1]]}
+    )
+    assert right["ok"] is True, right
+
+
+async def test_file_arguments_must_be_inside_the_allowed_directories(
+    setup: tuple[Harness, FastMCP], isolated_env: dict[str, Path], tmp_path: Path
+) -> None:
+    h, mcp = setup
+    calls = h.vissim.call_count
+    for bad in (
+        str(tmp_path / "outside.png"),
+        "C:/Windows/win.ini",
+        "..\\..\\secret.png",
+        "//server/share/x.png",
+    ):
+        denied = await call(
+            mcp,
+            TOOL,
+            {
+                "path": "Net.Links",
+                "method": "AddBackgroundImage",
+                "args": [0, bad, "POINT(1 1)", "POINT(0 0)"],
+            },
+        )
+        assert denied["error"]["code"] == "ATTRIBUTE_DENIED", (bad, denied)
+        assert "args[1]" in denied["error"]["message"]
+    nested = await call(
+        mcp,
+        TOOL,
+        {"path": "Net.Links", "method": "AddLink", "args": [0, "LINESTRING(0 0, 1 0)", ["C:/x/y.v3d"]]},
+    )
+    assert nested["error"]["code"] == "ATTRIBUTE_DENIED" and "args[2][0]" in nested["error"]["message"]
+    assert h.vissim.call_count == calls  # refused before any COM call
+    inside = str(isolated_env["projects"] / "images" / "map.png")
+    allowed = await call(
+        mcp,
+        TOOL,
+        {
+            "path": "Net.Links",
+            "method": "AddBackgroundImage",
+            "args": [0, inside, "POINT(1 1)", "POINT(0 0)"],
+        },
+    )
+    assert allowed["ok"] is True, allowed
+    # geometry, colours and names are not paths
+    for text in (
+        "LINESTRING(0 0, 200 0)",
+        "POLYGON((0 0, 1 0, 1 1, 0 0))",
+        "ff994400",
+        "Main street / north",
+    ):
+        network.check_path_arguments([text], h.service.policy)
+
+
+async def test_script_methods_are_denied_and_sub_collection_edits_allowed(
+    setup: tuple[Harness, FastMCP],
+) -> None:
+    h, mcp = setup
+    script = await call(mcp, TOOL, {"path": "Net.Links", "method": "AddScript", "args": [0]})
+    assert script["error"]["code"] == "ATTRIBUTE_DENIED" and "script" in script["error"]["message"]
+    replaced = await call(mcp, TOOL, {"path": "Net.Links", "method": "ReplaceAll", "args": [[1, 0, 2, 1]]})
+    assert replaced["ok"] is True and replaced["returned"] == {"value": None}
+    assert h.vissim.collection("Links").replaced_with == (1, 0, 2, 1)
 
 
 async def test_not_connected(harness: MakeHarness) -> None:
@@ -285,6 +408,8 @@ def test_method_policy() -> None:
         network.check_method_allowed(name, on_root=False)
     for name in ("RecalculateSpline", "InvertDirection", "MoveLinkDuringSimulation"):
         network.check_method_allowed(name, on_root=False)
+    for name in ("UpdateLinkSequence", "ReplaceAll", "AddPathForVehicle", "AddShortestPathForVehicleType"):
+        network.check_method_allowed(name, on_root=False)
     network.check_method_allowed("New", on_root=True)
     network.check_method_allowed("new", on_root=True)
     for name, on_root in (
@@ -292,6 +417,9 @@ def test_method_policy() -> None:
         ("GenerateModelTransferFile", True),
         ("GenerateModelTransferFile", False),
         ("AddFromFile", False),
+        ("AddScript", False),
+        ("RemoveScript", False),
+        ("AddFromPath", False),
         ("RunContinuous", False),
         ("OptimizeAll", False),
         ("New", False),
